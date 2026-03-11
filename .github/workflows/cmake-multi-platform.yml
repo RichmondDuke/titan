@@ -1,0 +1,48 @@
+name: Build Titan (Windows)
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  pull_request:
+    branches: [ "master", "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Conda Environment
+        # 使用 Miniconda 快速搭建隔离的 C++ 编译环境
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          auto-update-conda: true
+          activate-environment: titan-build-env
+          channels: conda-forge,defaults
+
+      - name: Install Exact Dependencies via Conda
+        # 这里的 llvmdev 包含了至关重要的 LLVMConfig.cmake 等开发文件
+        # 它直接提供编译好的二进制文件，免去了漫长的 CI 编译等待
+        run: |
+          conda install -y cmake ninja compiler-rt clangdev=15.0.7 llvmdev=15.0.7
+        shell: pwsh
+
+      - name: Configure CMake
+        # 直接使用默认配置。Conda 环境激活后，CMake 会自动在环境路径下找到 LLVM 15
+        run: cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release
+        shell: pwsh
+
+      - name: Build Project
+        run: cmake --build build --config Release
+        shell: pwsh
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: titan-release-windows
+          path: build/Release/ # 根据你实际生成的执行文件路径可微调
