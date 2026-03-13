@@ -23,42 +23,43 @@ jobs:
       - name: Setup MSVC Dev Cmd
         uses: ilammy/msvc-dev-cmd@v1
 
-      # LLVM: use Chocolatey to guarantee a full install with LLVMConfig.cmake
-      - name: Install LLVM 15 via Chocolatey
+      # Ensure we can install LLVM 15 even if a newer LLVM is preinstalled on windows-latest
+      - name: Install LLVM 15 via Chocolatey (allow downgrade)
         shell: pwsh
         run: |
-          choco install -y llvm --version 15.0.7
-          refreshenv
+          choco install -y llvm --version 15.0.7 --allow-downgrade --force
 
-      - name: Locate LLVMConfig.cmake (from Chocolatey LLVM)
+      - name: Locate LLVM 15 LLVMConfig.cmake
         shell: pwsh
         run: |
-          $roots = @(
-            "C:\Program Files\LLVM",
-            "C:\Program Files\LLVM\lib\cmake\llvm",
-            "C:\ProgramData\chocolatey\lib\llvm"
-          )
+          # Try to find LLVM 15 specifically (avoid accidentally picking LLVM 20)
+          $candidates = @()
+          $candidates += Get-ChildItem -Path "C:\Program Files" -Recurse -Filter "LLVMConfig.cmake" -ErrorAction SilentlyContinue
+          $candidates += Get-ChildItem -Path "C:\ProgramData\chocolatey" -Recurse -Filter "LLVMConfig.cmake" -ErrorAction SilentlyContinue
 
-          $cfg = $null
-          foreach ($r in $roots) {
-            if (Test-Path $r) {
-              $found = Get-ChildItem -Path $r -Recurse -Filter "LLVMConfig.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
-              if ($found) { $cfg = $found; break }
-            }
+          if (-not $candidates -or $candidates.Count -eq 0) {
+            throw "LLVMConfig.cmake not found after LLVM install"
           }
 
-          if (-not $cfg) {
-            Write-Host "Could not find LLVMConfig.cmake in common roots. Searching under C:\Program Files..."
-            $cfg = Get-ChildItem -Path "C:\Program Files" -Recurse -Filter "LLVMConfig.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
-          }
+          # Prefer paths that look like LLVM 15, otherwise take the first one
+          $picked = $candidates | Where-Object { $_.FullName -match "15" } | Select-Object -First 1
+          if (-not $picked) { $picked = $candidates | Select-Object -First 1 }
 
-          if (-not $cfg) { throw "LLVMConfig.cmake not found after LLVM install" }
-
-          $llvmDir = $cfg.Directory.FullName
-          Write-Host "Found LLVMConfig.cmake at: $($cfg.FullName)"
+          $llvmDir = $picked.Directory.FullName
+          Write-Host "Picked LLVMConfig.cmake: $($picked.FullName)"
           Write-Host "Using LLVM_DIR=$llvmDir"
 
           "LLVM_DIR=$llvmDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          # Ensure the corresponding clang is on PATH for later intrinsics step
+          $clangExe = Get-ChildItem -Path ($picked.FullName | Split-Path -Parent | Split-Path -Parent | Split-Path -Parent) -Recurse -Filter "clang.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($clangExe) {
+            Write-Host "Found clang at: $($clangExe.FullName)"
+            $clangBin = Split-Path $clangExe.FullName -Parent
+            $clangBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          } else {
+            Write-Host "Warning: clang.exe not found near LLVMConfig.cmake; will rely on PATH later."
+          }
 
       - name: Install tools (7zip)
         shell: pwsh
