@@ -94,26 +94,21 @@ jobs:
         shell: pwsh
         run: |
           $LLVM_PATH = "$env:CONDA_PREFIX/Library/lib/cmake/llvm"
+          $Z3_INC = "$env:CONDA_PREFIX/Library/include" # Z3 头文件实际所在位置
           
-          # 1. 自动定位系统中的旧版 MSVC 工具链 (优先寻找 14.2x 系列)
           $MSVC_BASE = "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Tools/MSVC"
           $OLD_MSVC = Get-ChildItem -Path $MSVC_BASE | Where-Object { $_.Name -like "14.2*" } | Select-Object -First 1 -ExpandProperty FullName
           
-          if ($null -eq $OLD_MSVC) {
-            # 如果没找到 14.2x，退而求其次找 2022 早期版 (14.3x)
-            $OLD_MSVC = Get-ChildItem -Path $MSVC_BASE | Where-Object { $_.Name -like "14.3*" } | Select-Object -First 1 -ExpandProperty FullName
-          }
-
-          # 2. 构造强制包含路径 (直接干预 Clang 的头文件搜索顺序)
           $CXX_FLAGS = "-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -D_HAS_DEPRECATED_RESULT_OF -D_CRT_SECURE_NO_WARNINGS"
+          
+          # 关键修复：显式添加 Z3 搜索路径
+          $CXX_FLAGS += " -isystem `"$Z3_INC`""
+          
           if ($null -ne $OLD_MSVC) {
-             Write-Host "Detected Older MSVC: $OLD_MSVC"
              $OLD_MSVC_INC = "$OLD_MSVC/include".Replace('\', '/')
-             # 使用 -isystem 强行将旧版头文件优先级调至最高
              $CXX_FLAGS += " -isystem `"$OLD_MSVC_INC`""
           }
 
-          # 3. 参数数组
           $cmakeArgs = @(
             "-B", "build",
             "-S", ".",
