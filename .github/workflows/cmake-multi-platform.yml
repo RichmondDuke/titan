@@ -1,11 +1,12 @@
-name: Build Titan (Windows)
+name: Build and Release Titan
 
 on:
   push:
     branches: [ "master", "main" ]
-  pull_request:
-    branches: [ "master", "main" ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -24,20 +25,17 @@ jobs:
           activate-environment: titan-build-env
           channels: conda-forge,defaults
 
-      - name: Install Base Dependencies via Conda
-        # 安装 LLVM, Clang, fmt 和 zlib
+      - name: Install Dependencies (Conda)
         run: |
-          conda install -y cmake ninja llvmdev=15.0.7 clangdev=15.0.7 fmt zlib
+          conda install -y cmake ninja llvmdev=15.0.7 clangdev=15.0.7 fmt zlib zstd range-v3 nlohmann_json
         shell: pwsh
 
-      - name: Install Triton via vcpkg
-        # 使用 vcpkg 专门安装 triton，这是最稳妥获取 tritonConfig.cmake 的方式
+      - name: Install Triton (vcpkg)
         run: |
           vcpkg install triton:x64-windows
         shell: pwsh
 
       - name: Configure CMake
-        # 同时引用 Conda 和 vcpkg 的路径
         run: |
           cmake -B build -S . -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
@@ -54,10 +52,27 @@ jobs:
           cmake --build build --config Release
         shell: pwsh
 
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+      - name: Organize and Zip Artifacts
+        # 这一步会收集所有可执行文件、库文件和配置文件并打包
+        run: |
+          mkdir dist
+          # 递归收集 exe, dll, sys 和 json 配置文件（根据需要增删后缀）
+          Get-ChildItem -Path build -Include *.exe, *.dll, *.sys, *.json -Recurse | Copy-Item -Destination dist\
+          # 将所有收集到的文件打成一个 zip 包
+          Compress-Archive -Path dist\* -DestinationPath titan-windows-x64.zip
+        shell: pwsh
+
+      - name: Create Release and Upload Zip
+        uses: softprops/action-gh-release@v2
         with:
-          name: Titan-Windows-Binary
-          path: |
-            build/*.exe
-            build/**/*.exe
+          tag_name: continuous-build
+          name: Continuous Build (Latest)
+          body: |
+            Automatically built from the latest commit.
+            - Includes: Executables, DLLs, and required configs.
+            - Toolchain: Clang 15.0.7 & Triton (vcpkg).
+          files: titan-windows-x64.zip # 只上传这一个压缩包
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
