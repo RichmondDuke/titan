@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2019  # 从 windows-latest 改为 windows-2019
 
     steps:
       - name: Checkout Repository
@@ -81,8 +81,9 @@ jobs:
           $LLVM_PATH = "$env:CONDA_PREFIX/Library/lib/cmake/llvm"
           $TRITON_CMAKE_DIR = "$env:GITHUB_WORKSPACE/triton-sdk/cmake".Replace('\', '/')
           
-          # 核心改动：增加 -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
-          # 这将跳过 "Unexpected compiler version" 的报错
+          # 关键点 1：查找系统中存在的较旧工具链路径（尝试定位 14.29 或更早版本）
+          # 如果不想硬编码路径，我们可以通过环境变量告诉 Clang 忽略当前的过新版本
+          
           cmake -B build -S . -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_PREFIX_PATH="$env:CONDA_PREFIX/Library;$TRITON_CMAKE_DIR" `
@@ -90,7 +91,7 @@ jobs:
             -Dtriton_DIR="$TRITON_CMAKE_DIR" `
             -DCMAKE_C_COMPILER="$env:CONDA_PREFIX/Library/bin/clang.exe" `
             -DCMAKE_CXX_COMPILER="$env:CONDA_PREFIX/Library/bin/clang++.exe" `
-            -DCMAKE_CXX_FLAGS="-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH"
+            -DCMAKE_CXX_FLAGS="-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -D_HAS_DEPRECATED_RESULT_OF -D_CRT_SECURE_NO_WARNINGS"
 
       - name: Build Project
         shell: pwsh
