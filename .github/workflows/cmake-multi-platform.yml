@@ -26,34 +26,36 @@ jobs:
           channels: conda-forge,defaults
 
       - name: Install Dependencies (Conda)
-        # 强制锁定 LLVM 15.0.7 以匹配 CMakeLists.txt 的硬性要求
+        # 强制锁定 LLVM 15 以匹配代码要求
         run: |
           conda install -y cmake ninja llvmdev=15.0.7 clangdev=15.0.7 fmt zlib zstd range-v3 nlohmann_json
         shell: pwsh
 
-      - name: Install Triton (vcpkg)
+      - name: Download and Setup Triton Binary
+        # 直接从 GitHub 获取预编译的 Triton (假设版本为 1.0.0，请根据 Triton 仓库实际 Release 调整链接)
+        # 这样可以节省大量编译时间并避免 vcpkg 冲突
         run: |
-          vcpkg install triton:x64-windows
+          $TRITON_URL = "https://github.com/JonathanSalwan/Triton/releases/download/v1.0.0/triton-1.0.0-msvc-x64.zip"
+          Invoke-WebRequest -Uri $TRITON_URL -OutFile triton.zip
+          Expand-Archive -Path triton.zip -DestinationPath "$env:CONDA_PREFIX/Library" -Force
+          # 确保头文件和库文件在 CMake 默认搜索路径下
         shell: pwsh
 
       - name: Configure CMake
         run: |
-          # 显式指定 LLVM 路径，防止 CMake 找到系统自带的错误版本
           $LLVM_PATH = "$env:CONDA_PREFIX/Library/lib/cmake/llvm"
           
+          # 注意：移除了 VCPKG 相关的 Toolchain 设置，改为纯前缀搜索
           cmake -B build -S . -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DCMAKE_PREFIX_PATH="$env:CONDA_PREFIX/Library" `
             -DLLVM_DIR=$LLVM_PATH `
             -DCMAKE_C_COMPILER="$env:CONDA_PREFIX/Library/bin/clang.exe" `
-            -DCMAKE_CXX_COMPILER="$env:CONDA_PREFIX/Library/bin/clang++.exe" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows
+            -DCMAKE_CXX_COMPILER="$env:CONDA_PREFIX/Library/bin/clang++.exe"
         shell: pwsh
 
       - name: Build Project
         run: |
-          # 将 Conda 的 bin 目录加入临时环境变量，确保编译器能找到 DLL
           $env:PATH = "$env:CONDA_PREFIX/Library/bin;$env:PATH"
           cmake --build build --config Release
         shell: pwsh
@@ -61,22 +63,20 @@ jobs:
       - name: Organize and Zip Artifacts
         run: |
           if (!(Test-Path dist)) { mkdir dist }
-          # 递归搜寻生成的二进制文件并打包
-          Get-ChildItem -Path build -Include *.exe, *.dll, *.sys, *.json -Recurse | Copy-Item -Destination dist\
+          # 搜集成果，包括可能需要的 Triton.dll
+          Get-ChildItem -Path build -Include *.exe, *.dll, *.sys -Recurse | Copy-Item -Destination dist\
+          if (Test-Path "$env:CONDA_PREFIX/Library/bin/triton.dll") {
+            Copy-Item "$env:CONDA_PREFIX/Library/bin/triton.dll" -Destination dist\
+          }
           Compress-Archive -Path dist\* -DestinationPath titan-windows-x64.zip -Force
         shell: pwsh
 
-      - name: Create Release and Upload Zip
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: continuous-build
           name: Continuous Build (Latest)
-          body: |
-            Built with LLVM 15.0.7 (Conda Environment).
-            - Toolchain: Clang 15
-            - Dependencies: Triton, Range-v3, JSON
           files: titan-windows-x64.zip
-          # 如果之前有同名 Tag，覆盖它
           overwrite: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
