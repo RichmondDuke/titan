@@ -93,34 +93,30 @@ jobs:
           $CONDA_CMAKE_DEST = "$env:CONDA_PREFIX/Library/lib/cmake/triton"
           if (!(Test-Path $CONDA_CMAKE_DEST)) { New-Item -ItemType Directory -Path $CONDA_CMAKE_DEST -Force }
           Copy-Item "triton-sdk/cmake/tritonConfig.cmake" "$CONDA_CMAKE_DEST/tritonConfig.cmake" -Force
-          
-      - name: Create Clang Wrapper
+
+
+      - name: Clang Hijack (Fix MSVC 14.44 & Float80)
         shell: pwsh
         run: |
-          # 创建一个临时的包装文件夹
-          $WrapperDir = New-Item -ItemType Directory -Path "$env:GITHUB_WORKSPACE/bin-wrapper" -Force
-          $RealClangPlus = "$env:CONDA_PREFIX/Library/bin/clang++.exe"
-          $RealClang = "$env:CONDA_PREFIX/Library/bin/clang.exe"
+          # 1. 创建一个拦截器目录
+          $HijackDir = New-Item -ItemType Directory -Path "$env:GITHUB_WORKSPACE/hijack" -Force
+          $RealClang = "$env:CONDA_PREFIX/Library/bin/clang++.exe"
 
-          # 创建 clang++.bat 包装脚本
-          # -mlong-double-80: 强制开启 80 位长浮点数支持
-          # -fms-compatibility: 解决 __cpuid 等宏定义冲突
-          $WrapperContent = @"
+          # 2. 编写包装脚本
+          # -mlong-double-80: 解决 Remill 的 float80 断言
+          # -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH: 解决 MSVC 14.44 的版本检查
+          # -fms-compatibility: 解决 __cpuid 宏冲突
+          $BatchContent = @"
           @echo off
-          "$RealClangPlus" -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -mlong-double-80 -fms-compatibility %*
+          "$RealClang" -mlong-double-80 -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -fms-compatibility %*
           "@
-          $WrapperContent | Set-Content -Path "$WrapperDir/clang++.bat" -Encoding Ascii
           
-          # 同样包装一份 clang.bat
-          $WrapperContentC = @"
-          @echo off
-          "$RealClang" -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -fms-compatibility %*
-          "@
-          $WrapperContentC | Set-Content -Path "$WrapperDir/clang.bat" -Encoding Ascii
+          $BatchContent | Set-Content -Path "$HijackDir/clang++.bat" -Encoding Ascii
+          Copy-Item "$HijackDir/clang++.bat" "$HijackDir/clang.bat"
 
-          # 将包装路径推到 PATH 的最前面，确保硬编码的 'clang++' 优先调用它
-          echo "$WrapperDir" >> $env:GITHUB_PATH
-
+          # 3. 将拦截器路径加入 GitHub Actions 全局 PATH 的最顶端
+          echo "$HijackDir" >> $env:GITHUB_PATH
+          Write-Host "Compiler hijacked successfully."
 
       - name: Configure CMake
         shell: pwsh
