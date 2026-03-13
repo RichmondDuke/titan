@@ -53,12 +53,18 @@ jobs:
             exit 1
           fi
 
-          LLVM_CONFIG_DIR="$(python -c "import os,sys; root=os.environ.get('CONDA_PREFIX',''); hit=''; 
-          import os as _os
-          for dp,_,fn in _os.walk(root):
-          if 'LLVMConfig.cmake' in fn:
-                hit=dp; break
-                print(hit)")"
+          # NOTE: Keep the python -c as a SINGLE LINE without newline indentation,
+          # otherwise Python can throw IndentationError.
+          LLVM_CONFIG_DIR="$(python - <<'PY'
+            import os, sys
+            root = os.environ["CONDA_PREFIX"]
+            for dirpath, dirnames, filenames in os.walk(root):
+              if "LLVMConfig.cmake" in filenames:
+                print(dirpath)
+                sys.exit(0)
+            sys.exit(2)
+          PY
+          )"
 
           if [ -z "$LLVM_CONFIG_DIR" ]; then
             echo "LLVMConfig.cmake not found under $CONDA_PREFIX"
@@ -130,4 +136,30 @@ jobs:
           $clang = Get-Command clang.exe -ErrorAction SilentlyContinue
           if (-not $clang) { throw "clang.exe not found in PATH" }
 
-          Write-Host "Using`](#)
+          Write-Host "Using clang: $($clang.Source)"
+
+          Push-Location intrinsics
+          & $clang.Source `
+            -std=c++17 `
+            -O3 `
+            -Iremill/include `
+            -Wno-gnu-inline-cpp-without-extern `
+            -fno-discard-value-names `
+            -fstrict-aliasing `
+            -fno-slp-vectorize `
+            -mllvm -enable-tbaa=true `
+            -emit-llvm `
+            -DADDRESS_SIZE_BITS=64 `
+            -m64 `
+            -S main.cpp `
+            -o vmprotect64.ll
+          Pop-Location
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: titan-windows-release
+          path: |
+            build/titan.exe
+            build/Release/titan.exe
+            intrinsics/vmprotect64.ll
