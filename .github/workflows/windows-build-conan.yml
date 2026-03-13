@@ -1,4 +1,4 @@
-name: windows-llvm15-triton-headers-only
+name: windows-llvm15-triton-headers-from-git
 
 on:
   push:
@@ -62,7 +62,7 @@ jobs:
         run: |
           choco install -y 7zip
 
-      - name: Download & extract Triton prebuilt (bin/lib only)
+      - name: Download & extract Triton prebuilt (lib/bin)
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force "_deps" | Out-Null
@@ -74,45 +74,52 @@ jobs:
           Write-Host "Triton bin extracted to ${{ env.TRITON_BIN_DIR }}"
           Get-ChildItem -Force -Recurse -Depth 4 "${{ env.TRITON_BIN_DIR }}" | Select-Object FullName
 
-      - name: Clone Triton source (headers only)
+      - name: Clone Triton source (headers)
         shell: pwsh
         run: |
           if (Test-Path "${{ env.TRITON_SRC_DIR }}") { Remove-Item -Recurse -Force "${{ env.TRITON_SRC_DIR }}" }
-          git clone --depth 1 https://github.com/JonathanSalwan/Triton "${{ env.TRITON_SRC_DIR }}"
+
+          git clone https://github.com/JonathanSalwan/Triton "${{ env.TRITON_SRC_DIR }}"
           git -C "${{ env.TRITON_SRC_DIR }}" rev-parse HEAD
 
-          # Sanity check: header dir
-          $inc1 = Join-Path "${{ env.TRITON_SRC_DIR }}" "include"
-          if (!(Test-Path $inc1)) {
-            throw "Triton source clone does not have 'include' directory at expected path: $inc1"
+          $hdrRoot = Join-Path "${{ env.TRITON_SRC_DIR }}" "src\libtriton\includes\triton"
+          $hdrCheck = Join-Path $hdrRoot "triton"
+          if (!(Test-Path $hdrCheck)) {
+            throw "Expected headers not found: $hdrCheck"
           }
 
-      - name: Generate tritonConfig.cmake shim (include from git, lib from 7z)
+          Write-Host "Triton header root: $hdrRoot"
+
+      - name: Generate tritonConfig.cmake shim (headers from git, lib from 7z)
         shell: pwsh
         run: |
           $srcRoot = "${{ env.TRITON_SRC_DIR }}"
           $binRoot = "${{ env.TRITON_BIN_DIR }}"
 
-          $includeDir = Join-Path $srcRoot "include"
-          if (!(Test-Path $includeDir)) { throw "Include dir not found: $includeDir" }
+          $includeDir = Join-Path $srcRoot "src\libtriton\includes"
+          if (!(Test-Path (Join-Path $includeDir "triton"))) {
+            throw "Include directory does not contain 'triton' folder: $includeDir"
+          }
 
-          # Prefer triton*.lib; fallback to first .lib
           $lib = Get-ChildItem -Path $binRoot -Recurse -Filter "triton*.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $lib) {
             $lib = Get-ChildItem -Path $binRoot -Recurse -Filter "*.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
           }
           if (-not $lib) {
-            Write-Host "Triton prebuilt seems to not contain a .lib (only dll/python?)"
-            throw "Cannot satisfy CMake find_package(triton CONFIG): no import library (.lib) found."
+            throw "No import library (.lib) found in Triton prebuilt archive."
           }
 
-          Write-Host "Using Triton include from git: $includeDir"
-          Write-Host "Using Triton lib from 7z: $($lib.FullName)"
+          Write-Host "Using Triton include: $includeDir"
+          Write-Host "Using Triton lib: $($lib.FullName)"
 
           $shimDir = Join-Path $env:RUNNER_TEMP "triton-cmake"
           New-Item -ItemType Directory -Force $shimDir | Out-Null
 
           $cfgPath = Join-Path $shimDir "tritonConfig.cmake"
+
+          $inc = $includeDir.Replace('\','/')
+          $libPath = $lib.FullName.Replace('\','/')
+
           @"
           # Auto-generated Triton CMake package config (shim) for CI.
           set(triton_FOUND TRUE)
@@ -120,8 +127,8 @@ jobs:
           if(NOT TARGET triton::triton)
             add_library(triton::triton UNKNOWN IMPORTED)
             set_target_properties(triton::triton PROPERTIES
-              IMPORTED_LOCATION "$($lib.FullName.Replace('\','/'))"
-              INTERFACE_INCLUDE_DIRECTORIES "$($includeDir.Replace('\','/'))"
+              IMPORTED_LOCATION "$libPath"
+              INTERFACE_INCLUDE_DIRECTORIES "$inc"
             )
           endif()
           "@ | Set-Content -Path $cfgPath -Encoding UTF8
