@@ -1,4 +1,4 @@
-name: windows-build-conan
+name: windows-llvm15-triton-prebuilt
 
 on:
   push:
@@ -9,14 +9,10 @@ jobs:
   build:
     runs-on: windows-latest
 
-    strategy:
-      fail-fast: false
-      matrix:
-        build_type: [Release]
-
     env:
       BUILD_DIR: build
-      CONAN_HOME: ${{ github.workspace }}\.conan2
+      TRITON_URL: https://github.com/JonathanSalwan/Triton/releases/download/v0.9/triton-x64-vs2019-py37.release.7z
+      TRITON_DIR: ${{ github.workspace }}\_deps\triton
 
     steps:
       - name: Checkout (with submodules)
@@ -32,6 +28,23 @@ jobs:
         with:
           version: "15.0.7"
           directory: ${{ runner.temp }}\llvm
+
+      - name: Install tools (7zip)
+        shell: pwsh
+        run: |
+          choco install -y 7zip
+
+      - name: Download & extract Triton prebuilt
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "_deps" | Out-Null
+          $archive = Join-Path $env:RUNNER_TEMP "triton.7z"
+          Invoke-WebRequest -Uri "${{ env.TRITON_URL }}" -OutFile $archive
+          New-Item -ItemType Directory -Force "${{ env.TRITON_DIR }}" | Out-Null
+          & 7z x $archive "-o${{ env.TRITON_DIR }}" -y
+
+          Write-Host "Triton extracted to ${{ env.TRITON_DIR }}"
+          Get-ChildItem -Recurse -Depth 2 "${{ env.TRITON_DIR }}" | Select-Object FullName
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -49,12 +62,12 @@ jobs:
         run: |
           conan profile detect --force
 
-      - name: Conan install deps
+      - name: Conan install deps (fmt/range-v3/z3/capstone)
         shell: pwsh
         run: |
           conan install . `
             -of "$env:BUILD_DIR\conan" `
-            -s build_type=${{ matrix.build_type }} `
+            -s build_type=Release `
             -b missing
 
       - name: Configure (CMake)
@@ -64,17 +77,18 @@ jobs:
           $llvmCmake = Join-Path $llvmDir "lib\cmake\llvm"
 
           cmake -S . -B $env:BUILD_DIR `
-            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
+            -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_TOOLCHAIN_FILE="$env:BUILD_DIR\conan\conan_toolchain.cmake" `
             -DCMAKE_PREFIX_PATH="$env:BUILD_DIR\conan" `
-            -DLLVM_DIR="$llvmCmake"
+            -DLLVM_DIR="$llvmCmake" `
+            -DTRITON_ROOT="${{ env.TRITON_DIR }}"
 
       - name: Build titan.exe
         shell: pwsh
         run: |
-          cmake --build $env:BUILD_DIR --config ${{ matrix.build_type }} --parallel
+          cmake --build $env:BUILD_DIR --config Release --parallel
 
-      - name: Build intrinsics (vmprotect64.ll)
+      - name: Generate vmprotect64.ll (intrinsics)
         shell: pwsh
         run: |
           $llvmDir = "${{ runner.temp }}\llvm"
@@ -98,11 +112,25 @@ jobs:
             -o vmprotect64.ll
           Pop-Location
 
+      # 运行时若缺 Triton.dll：把 Triton 的 bin 目录加入 PATH（如果有）
+      - name: Add Triton bin to PATH (best-effort)
+        shell: pwsh
+        run: |
+          $binCandidates = @(
+            Join-Path "${{ env.TRITON_DIR }}" "bin"
+            Join-Path "${{ env.TRITON_DIR }}" "lib"
+          )
+          foreach ($p in $binCandidates) {
+            if (Test-Path $p) {
+              echo $p | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+            }
+          }
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: titan-windows-${{ matrix.build_type }}
+          name: titan-windows-release
           path: |
             build/titan.exe
-            build/${{ matrix.build_type }}/titan.exe
+            build/Release/titan.exe
             intrinsics/vmprotect64.ll
