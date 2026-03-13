@@ -48,31 +48,37 @@ jobs:
           $PyWrapper = @"
           import sys, subprocess, os
           
-          # 1. 过滤掉所有可能触发 C++20 的参数，并强制注入屏蔽宏
+          # 1. 识别当前是 C 还是 C++ 模式
+          invoked_as = os.path.basename(sys.argv[0]).lower()
+          is_cpp = '++' in invoked_as
+          
+          # 2. 过滤掉原始命令行中冲突的标准定义
           incoming_args = sys.argv[1:]
-          filtered_args = []
-          for arg in incoming_args:
-              if arg.startswith('-std=') or arg.startswith('/std:'):
-                  continue # 扔掉原始的标准定义
-              filtered_args.append(arg)
+          filtered_args = [arg for arg in incoming_args if not (arg.startswith('-std=') or arg.startswith('/std:'))]
 
-          # 2. 注入我们自己的硬核参数
+          # 3. 构造核心补丁参数
+          # 无论 C/C++ 都需要的宏
           extra_args = [
-              '-std=c++17',  # 强制统一标准
               '-mlong-double-80', 
               '-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH',
               '-fms-compatibility',
               '-fms-extensions',
               '-D_HAS_CONSTEXPR_BIT_CAST=0',
               '-D_INTERNAL_BIT_CAST_SUPPORTED=0',
-              '-D_CRT_USE_BUILTIN_OFFSETOF',
-              '-DFMT_USE_LONG_DOUBLE=0'
+              '-D_CRT_USE_BUILTIN_OFFSETOF'
           ]
+
+          # 4. 根据模式注入对应的标准
+          if is_cpp:
+              extra_args.append('-std=c++17')
+              extra_args.append('-DFMT_USE_LONG_DOUBLE=0')
+              real_compiler = r'$CLANG_BIN/clang++-real.exe'
+          else:
+              # C 模式下使用 c11，避免传入 c++17 导致报错
+              extra_args.append('-std=c11')
+              real_compiler = r'$CLANG_BIN/clang-real.exe'
           
-          invoked_as = os.path.basename(sys.argv[0]).lower()
-          real_compiler = r'$CLANG_BIN/clang++-real.exe' if '++' in invoked_as else r'$CLANG_BIN/clang-real.exe'
-          
-          # 3. 执行最终命令
+          # 5. 执行最终命令
           result = subprocess.run([real_compiler] + extra_args + filtered_args)
           sys.exit(result.returncode)
           "@
