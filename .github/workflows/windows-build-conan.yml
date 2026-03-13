@@ -23,51 +23,16 @@ jobs:
       - name: Setup MSVC Dev Cmd
         uses: ilammy/msvc-dev-cmd@v1
 
+      - name: Install LLVM 15 (clang + LLVMConfig.cmake)
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "15.0.7"
+          directory: ${{ runner.temp }}\llvm
+
       - name: Install tools (7zip)
         shell: pwsh
         run: |
           choco install -y 7zip
-
-      # LLVM 15 via Conda (conda-forge). Install llvmdev so LLVMConfig.cmake exists.
-      - name: Setup Miniconda (conda-forge)
-        uses: conda-incubator/setup-miniconda@v3
-        with:
-          auto-update-conda: true
-          activate-environment: llvm15
-          python-version: "3.11"
-          channels: conda-forge
-          channel-priority: strict
-
-      - name: Install LLVM 15 (conda, llvmdev)
-        shell: bash -l {0}
-        run: |
-          conda info
-          conda install -y "llvmdev=15.*" "clang=15.*" "lld=15.*"
-          which clang
-          which llvm-config
-
-      - name: Locate LLVMConfig.cmake (from conda llvmdev)
-        shell: bash -l {0}
-        run: |
-          set -euo pipefail
-          echo "CONDA_PREFIX=$CONDA_PREFIX"
-          test -n "${CONDA_PREFIX:-}"
-
-          # On conda-forge Windows, executables are typically in $CONDA_PREFIX/Library/bin
-          if [ -d "$CONDA_PREFIX/Library/bin" ]; then
-            echo "$CONDA_PREFIX/Library/bin" >> "$GITHUB_PATH"
-          fi
-
-          # Find LLVMConfig.cmake (llvmdev should provide it)
-          LLVM_CONFIG_DIR="$(python -c "import os,sys; import os as _os; root=os.environ.get('CONDA_PREFIX',''); hit=''; [hit:=dp for dp,_,fn in _os.walk(root) if (not hit and 'LLVMConfig.cmake' in fn)]; print(hit)")"
-
-          if [ -z "$LLVM_CONFIG_DIR" ]; then
-            echo "LLVMConfig.cmake not found under $CONDA_PREFIX (llvmdev install may have failed or package layout differs)"
-            exit 1
-          fi
-
-          echo "Found LLVM_DIR=$LLVM_CONFIG_DIR"
-          echo "LLVM_DIR=$LLVM_CONFIG_DIR" >> "$GITHUB_ENV"
 
       - name: Download & extract Triton prebuilt
         shell: pwsh
@@ -79,9 +44,9 @@ jobs:
           & 7z x $archive "-o${{ env.TRITON_DIR }}" -y
 
           Write-Host "Triton extracted to ${{ env.TRITON_DIR }}"
-          Get-ChildItem -Recurse -Depth 3 "${{ env.TRITON_DIR }}" | Select-Object FullName
+          Get-ChildItem -Recurse -Depth 2 "${{ env.TRITON_DIR }}" | Select-Object FullName
 
-      - name: Setup Python (for Conan)
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -106,9 +71,20 @@ jobs:
             -s compiler.cppstd=20 `
             -b missing
 
+      - name: Debug -> list Conan output folder
+        shell: pwsh
+        run: |
+          Write-Host "Listing $env:BUILD_DIR\conan"
+          Get-ChildItem -Force -Recurse "$env:BUILD_DIR\conan" | Select-Object FullName
+
+      # Triton prebuilt does not ship a tritonConfig.cmake; provide a Find module via CMAKE_MODULE_PATH.
+      # This assumes you have (or will add) a file at: cmake/Findtriton.cmake in the repo.
       - name: Configure (CMake)
         shell: pwsh
         run: |
+          $llvmDir = "${{ runner.temp }}\llvm"
+          $llvmCmake = Join-Path $llvmDir "lib\cmake\llvm"
+
           $conanGen = Resolve-Path "$env:BUILD_DIR\conan\build\generators"
           $toolchain = Join-Path $conanGen "conan_toolchain.cmake"
 
@@ -116,8 +92,11 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
             -DCMAKE_PREFIX_PATH="$conanGen" `
-            -DLLVM_DIR="$env:LLVM_DIR" `
-            -DTRITON_ROOT="${{ env.TRITON_DIR }}"
+            -DCMAKE_MODULE_PATH="${{ github.workspace }}\cmake" `
+            -DTRITON_ROOT="${{ env.TRITON_DIR }}" `
+            -Dtriton_ROOT="${{ env.TRITON_DIR }}" `
+            -Dtriton_DIR="${{ env.TRITON_DIR }}" `
+            -DLLVM_DIR="$llvmCmake"
 
       - name: Build titan.exe
         shell: pwsh
@@ -127,13 +106,12 @@ jobs:
       - name: Generate vmprotect64.ll (intrinsics)
         shell: pwsh
         run: |
-          $clang = Get-Command clang.exe -ErrorAction SilentlyContinue
-          if (-not $clang) { throw "clang.exe not found in PATH" }
-
-          Write-Host "Using clang: $($clang.Source)"
+          $llvmDir = "${{ runner.temp }}\llvm"
+          $clang = Join-Path $llvmDir "bin\clang.exe"
+          if (!(Test-Path $clang)) { throw "clang not found at $clang" }
 
           Push-Location intrinsics
-          & $clang.Source `
+          & $clang `
             -std=c++17 `
             -O3 `
             -Iremill/include `
@@ -148,6 +126,20 @@ jobs:
             -S main.cpp `
             -o vmprotect64.ll
           Pop-Location
+
+      # Runtime: if Triton.dll is needed at runtime, add Triton bin folders to PATH (best-effort)
+      - name: Add Triton bin to PATH (best-effort)
+        shell: pwsh
+        run: |
+          $binCandidates = @(
+            Join-Path "${{ env.TRITON_DIR }}" "bin"
+            Join-Path "${{ env.TRITON_DIR }}" "lib"
+          )
+          foreach ($p in $binCandidates) {
+            if (Test-Path $p) {
+              echo $p | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+            }
+          }
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
