@@ -57,17 +57,11 @@ jobs:
           # Find LLVMConfig.cmake (llvmdev should provide it)
           $cfg = Get-ChildItem -Path $env:CONDA_PREFIX -Recurse -Filter "LLVMConfig.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $cfg) {
-            Write-Host "ERROR: LLVMConfig.cmake not found under $env:CONDA_PREFIX"
-            Write-Host "Debug: listing directories that look like '*\cmake\llvm' (depth-limited best-effort)"
-            Get-ChildItem -Path $env:CONDA_PREFIX -Recurse -Directory -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -match "\\cmake\\llvm$" } |
-              Select-Object -First 50 FullName
-            throw "LLVMConfig.cmake not found"
+            throw "LLVMConfig.cmake not found under $env:CONDA_PREFIX"
           }
 
           $llvmDir = $cfg.Directory.FullName
           Write-Host "Found LLVMConfig.cmake at: $($cfg.FullName)"
-          Write-Host "Exporting LLVM_DIR=$llvmDir"
           "LLVM_DIR=$llvmDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install tools (7zip)
@@ -85,7 +79,61 @@ jobs:
           & 7z x $archive "-o${{ env.TRITON_DIR }}" -y
 
           Write-Host "Triton extracted to ${{ env.TRITON_DIR }}"
-          Get-ChildItem -Recurse -Depth 2 "${{ env.TRITON_DIR }}" | Select-Object FullName
+          Get-ChildItem -Recurse -Depth 3 "${{ env.TRITON_DIR }}" | Select-Object FullName
+
+      - name: Generate tritonConfig.cmake shim (for prebuilt Triton)
+        shell: pwsh
+        run: |
+          $tritonRoot = "${{ env.TRITON_DIR }}"
+          if (!(Test-Path $tritonRoot)) { throw "TRITON_DIR does not exist: $tritonRoot" }
+
+          # Best-effort locate include dir
+          $includeDir = @(
+            (Join-Path $tritonRoot "include"),
+            (Join-Path $tritonRoot "triton\include")
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+          if (-not $includeDir) {
+            # fallback: search for a directory that contains at least one header
+            $includeDir = Get-ChildItem -Path $tritonRoot -Recurse -Directory -ErrorAction SilentlyContinue |
+              Where-Object { Test-Path (Join-Path $_.FullName "triton") -or (Get-ChildItem $_.FullName -Filter *.h -ErrorAction SilentlyContinue | Select-Object -First 1) } |
+              Select-Object -First 1 -ExpandProperty FullName
+          }
+
+          # Best-effort locate a library (Windows: .lib)
+          $lib = Get-ChildItem -Path $tritonRoot -Recurse -Filter "triton*.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $lib) {
+            # Some packages may name it differently; just pick the first .lib as a last resort
+            $lib = Get-ChildItem -Path $tritonRoot -Recurse -Filter "*.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+
+          if (-not $includeDir) { throw "Could not locate Triton include directory under $tritonRoot" }
+          if (-not $lib) { throw "Could not locate Triton .lib under $tritonRoot" }
+
+          Write-Host "Using Triton include: $includeDir"
+          Write-Host "Using Triton lib: $($lib.FullName)"
+
+          $shimDir = Join-Path $env:RUNNER_TEMP "triton-cmake"
+          New-Item -ItemType Directory -Force $shimDir | Out-Null
+
+          $cfgPath = Join-Path $shimDir "tritonConfig.cmake"
+          @"
+          # Auto-generated Triton CMake package config (shim) for CI.
+          # Allows: find_package(triton CONFIG REQUIRED)
+          set(triton_FOUND TRUE)
+
+          if(NOT TARGET triton::triton)
+            add_library(triton::triton UNKNOWN IMPORTED)
+            set_target_properties(triton::triton PROPERTIES
+             IMPORTED_LOCATION "$($lib.FullName.Replace('\','/'))"
+              INTERFACE_INCLUDE_DIRECTORIES "$($includeDir.Replace('\','/'))"
+            )
+          endif()
+          "@ | Set-Content -Path $cfgPath -Encoding UTF8
+
+          "triton_DIR=$($shimDir)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Exported triton_DIR=$shimDir"
+          Write-Host "Generated $cfgPath"
 
       - name: Setup Python (for Conan)
         uses: actions/setup-python@v5
@@ -119,19 +167,16 @@ jobs:
           $toolchain = Join-Path $conanGen "conan_toolchain.cmake"
 
           # Use forward slashes for CMake list/path variables to avoid backslash escapes like \a, \t, etc.
-          $ws = "${{ github.workspace }}".Replace('\', '/')
-          $cmakeModules = "$ws/cmake"
           $tritonRoot = "${{ env.TRITON_DIR }}".Replace('\', '/')
           $llvmDir = "$env:LLVM_DIR".Replace('\', '/')
+          $tritonDir = "$env:triton_DIR".Replace('\', '/')
 
           cmake -S . -B $env:BUILD_DIR `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
             -DCMAKE_PREFIX_PATH="$($conanGen.Path.Replace('\','/'))" `
-            -DCMAKE_MODULE_PATH="$cmakeModules" `
             -DTRITON_ROOT="$tritonRoot" `
-            -Dtriton_ROOT="$tritonRoot" `
-            -Dtriton_DIR="$tritonRoot" `
+            -Dtriton_DIR="$tritonDir" `
             -DLLVM_DIR="$llvmDir"
 
       - name: Build titan.exe
