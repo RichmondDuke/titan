@@ -78,18 +78,20 @@ jobs:
           Write-Host "Listing $env:BUILD_DIR\conan"
           Get-ChildItem -Force -Recurse "$env:BUILD_DIR\conan" | Select-Object FullName
 
+      # 仅替换 Configure (CMake) 这一步
       - name: Configure (CMake)
         shell: pwsh
         run: |
           $llvmDir = "${{ runner.temp }}\llvm"
           $llvmCmake = Join-Path $llvmDir "lib\cmake\llvm"
 
-          $toolchain = Resolve-Path "$env:BUILD_DIR\conan\conan_toolchain.cmake"
+          $conanGen = Resolve-Path "$env:BUILD_DIR\conan\build\generators"
+          $toolchain = Join-Path $conanGen "conan_toolchain.cmake"
 
           cmake -S . -B $env:BUILD_DIR `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
-            -DCMAKE_PREFIX_PATH="$env:BUILD_DIR\conan" `
+            -DCMAKE_PREFIX_PATH="$conanGen" `
             -DLLVM_DIR="$llvmCmake" `
             -DTRITON_ROOT="${{ env.TRITON_DIR }}"
 
