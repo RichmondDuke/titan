@@ -79,16 +79,18 @@ jobs:
         shell: pwsh
         run: |
           $LLVM_PATH = "$env:CONDA_PREFIX/Library/lib/cmake/llvm"
-          # 确保路径使用正斜杠，CMake 在 Windows 上处理反斜杠有时会出问题
           $TRITON_CMAKE_DIR = "$env:GITHUB_WORKSPACE/triton-sdk/cmake".Replace('\', '/')
           
+          # 核心改动：增加 -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
+          # 这将跳过 "Unexpected compiler version" 的报错
           cmake -B build -S . -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_PREFIX_PATH="$env:CONDA_PREFIX/Library;$TRITON_CMAKE_DIR" `
             -DLLVM_DIR="$LLVM_PATH" `
             -Dtriton_DIR="$TRITON_CMAKE_DIR" `
             -DCMAKE_C_COMPILER="$env:CONDA_PREFIX/Library/bin/clang.exe" `
-            -DCMAKE_CXX_COMPILER="$env:CONDA_PREFIX/Library/bin/clang++.exe"
+            -DCMAKE_CXX_COMPILER="$env:CONDA_PREFIX/Library/bin/clang++.exe" `
+            -DCMAKE_CXX_FLAGS="-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH"
 
       - name: Build Project
         shell: pwsh
