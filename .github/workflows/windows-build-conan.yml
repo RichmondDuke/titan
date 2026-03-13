@@ -28,7 +28,7 @@ jobs:
         run: |
           choco install -y 7zip
 
-      # LLVM 15 via Conda (conda-forge) to ensure LLVMConfig.cmake exists
+      # LLVM 15 via Conda (conda-forge). Install llvmdev so LLVMConfig.cmake exists.
       - name: Setup Miniconda (conda-forge)
         uses: conda-incubator/setup-miniconda@v3
         with:
@@ -38,36 +38,36 @@ jobs:
           channels: conda-forge
           channel-priority: strict
 
-      - name: Install LLVM 15 (conda)
+      - name: Install LLVM 15 (conda, llvmdev)
         shell: bash -l {0}
         run: |
           conda info
-          conda install -y "llvm=15.*" "clang=15.*" "lld=15.*"
+          conda install -y "llvmdev=15.*" "clang=15.*" "lld=15.*"
+          which clang
+          which llvm-config
 
-      - name: Locate LLVMConfig.cmake (from conda)
+      - name: Locate LLVMConfig.cmake (from conda llvmdev)
         shell: bash -l {0}
         run: |
+          set -euo pipefail
           echo "CONDA_PREFIX=$CONDA_PREFIX"
-          if [ -z "$CONDA_PREFIX" ]; then
-            echo "CONDA_PREFIX is empty"
-            exit 1
-          fi
-
-          # IMPORTANT: keep the python code on ONE LINE so YAML + bash parsing is stable.
-          LLVM_CONFIG_DIR="$(python -c "import os,sys; import os as _os; root=os.environ.get('CONDA_PREFIX',''); hit=''; [hit:=dp for dp,_,fn in _os.walk(root) if (not hit and 'LLVMConfig.cmake' in fn)]; print(hit)")"
-
-          if [ -z "$LLVM_CONFIG_DIR" ]; then
-            echo "LLVMConfig.cmake not found under $CONDA_PREFIX"
-            exit 1
-          fi
-
-          echo "Found LLVM_DIR=$LLVM_CONFIG_DIR"
-          echo "LLVM_DIR=$LLVM_CONFIG_DIR" >> "$GITHUB_ENV"
+          test -n "${CONDA_PREFIX:-}"
 
           # On conda-forge Windows, executables are typically in $CONDA_PREFIX/Library/bin
           if [ -d "$CONDA_PREFIX/Library/bin" ]; then
             echo "$CONDA_PREFIX/Library/bin" >> "$GITHUB_PATH"
           fi
+
+          # Find LLVMConfig.cmake (llvmdev should provide it)
+          LLVM_CONFIG_DIR="$(python -c "import os,sys; import os as _os; root=os.environ.get('CONDA_PREFIX',''); hit=''; [hit:=dp for dp,_,fn in _os.walk(root) if (not hit and 'LLVMConfig.cmake' in fn)]; print(hit)")"
+
+          if [ -z "$LLVM_CONFIG_DIR" ]; then
+            echo "LLVMConfig.cmake not found under $CONDA_PREFIX (llvmdev install may have failed or package layout differs)"
+            exit 1
+          fi
+
+          echo "Found LLVM_DIR=$LLVM_CONFIG_DIR"
+          echo "LLVM_DIR=$LLVM_CONFIG_DIR" >> "$GITHUB_ENV"
 
       - name: Download & extract Triton prebuilt
         shell: pwsh
@@ -81,24 +81,29 @@ jobs:
           Write-Host "Triton extracted to ${{ env.TRITON_DIR }}"
           Get-ChildItem -Recurse -Depth 3 "${{ env.TRITON_DIR }}" | Select-Object FullName
 
+      - name: Setup Python (for Conan)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Install Conan 2
-        shell: bash -l {0}
+        shell: pwsh
         run: |
           python -m pip install --upgrade pip
           pip install "conan>=2.0,<3.0"
 
       - name: Conan profile detect
-        shell: bash -l {0}
+        shell: pwsh
         run: |
           conan profile detect --force
 
       - name: Conan install deps (fmt/range-v3/z3/capstone)
-        shell: bash -l {0}
+        shell: pwsh
         run: |
-          conan install . \
-            -of "${BUILD_DIR}/conan" \
-            -s build_type=Release \
-            -s compiler.cppstd=20 \
+          conan install . `
+            -of "$env:BUILD_DIR\conan" `
+            -s build_type=Release `
+            -s compiler.cppstd=20 `
             -b missing
 
       - name: Configure (CMake)
@@ -132,4 +137,23 @@ jobs:
             -std=c++17 `
             -O3 `
             -Iremill/include `
-            -Wno-gnu`](#)
+            -Wno-gnu-inline-cpp-without-extern `
+            -fno-discard-value-names `
+            -fstrict-aliasing `
+            -fno-slp-vectorize `
+            -mllvm -enable-tbaa=true `
+            -emit-llvm `
+            -DADDRESS_SIZE_BITS=64 `
+            -m64 `
+            -S main.cpp `
+            -o vmprotect64.ll
+          Pop-Location
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: titan-windows-release
+          path: |
+            build/titan.exe
+            build/Release/titan.exe
+            intrinsics/vmprotect64.ll
