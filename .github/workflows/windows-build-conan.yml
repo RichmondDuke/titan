@@ -82,7 +82,7 @@ jobs:
           git clone https://github.com/JonathanSalwan/Triton "${{ env.TRITON_SRC_DIR }}"
           git -C "${{ env.TRITON_SRC_DIR }}" rev-parse HEAD
 
-          $hdrRoot = Join-Path "${{ env.TRITON_SRC_DIR }}" "src\libtriton\includes\triton"
+          $hdrRoot = Join-Path "${{ env.TRITON_SRC_DIR }}" "src\libtriton\includes"
           $hdrCheck = Join-Path $hdrRoot "triton"
           if (!(Test-Path $hdrCheck)) {
             throw "Expected headers not found: $hdrCheck"
