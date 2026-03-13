@@ -27,11 +27,11 @@ jobs:
       - name: Setup MSVC Dev Cmd
         uses: ilammy/msvc-dev-cmd@v1
 
-      # LLVM 固定 15.0.7（提供 LLVMConfig.cmake + clang）
-      - name: Setup LLVM 15
-        uses: llvm/actions/setup-llvm@v1
+      - name: Install LLVM 15 (clang + LLVMConfig.cmake)
+        uses: KyleMayes/install-llvm-action@v2
         with:
           version: "15.0.7"
+          directory: ${{ runner.temp }}\llvm
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -44,13 +44,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install "conan>=2.0,<3.0"
 
-      # 让 conan 知道当前是 MSVC（生成 profile）
       - name: Conan profile detect
         shell: pwsh
         run: |
           conan profile detect --force
 
-      # 安装依赖（尽量走二进制：--build=missing 表示没找到二进制才编译）
       - name: Conan install deps
         shell: pwsh
         run: |
@@ -62,22 +60,25 @@ jobs:
       - name: Configure (CMake)
         shell: pwsh
         run: |
+          $llvmDir = "${{ runner.temp }}\llvm"
+          $llvmCmake = Join-Path $llvmDir "lib\cmake\llvm"
+
           cmake -S . -B $env:BUILD_DIR `
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
             -DCMAKE_TOOLCHAIN_FILE="$env:BUILD_DIR\conan\conan_toolchain.cmake" `
             -DCMAKE_PREFIX_PATH="$env:BUILD_DIR\conan" `
-            -DLLVM_DIR="$env:LLVM_DIR\lib\cmake\llvm"
+            -DLLVM_DIR="$llvmCmake"
 
       - name: Build titan.exe
         shell: pwsh
         run: |
           cmake --build $env:BUILD_DIR --config ${{ matrix.build_type }} --parallel
 
-      # intrinsics：同之前一样，直接调用 clang 生成 64-bit ll（避免 intrinsics/CMakeLists.txt 写死 clang++）
       - name: Build intrinsics (vmprotect64.ll)
         shell: pwsh
         run: |
-          $clang = Join-Path $env:LLVM_DIR "bin\clang.exe"
+          $llvmDir = "${{ runner.temp }}\llvm"
+          $clang = Join-Path $llvmDir "bin\clang.exe"
           if (!(Test-Path $clang)) { throw "clang not found at $clang" }
 
           Push-Location intrinsics
