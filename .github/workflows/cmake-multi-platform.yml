@@ -94,18 +94,18 @@ jobs:
         shell: pwsh
         run: |
           $LLVM_PATH = "$env:CONDA_PREFIX/Library/lib/cmake/llvm"
-          $Z3_INC = "$env:CONDA_PREFIX/Library/include" # Z3 头文件实际所在位置
+          # 统一使用反斜杠，并确保路径末尾没有歧义
+          $Z3_INC = "$env:CONDA_PREFIX\Library\include"
           
           $MSVC_BASE = "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Tools/MSVC"
           $OLD_MSVC = Get-ChildItem -Path $MSVC_BASE | Where-Object { $_.Name -like "14.2*" } | Select-Object -First 1 -ExpandProperty FullName
           
+          # 将 Z3 路径显式放入 CXX_FLAGS，并使用 -I 而不是 -isystem 来强制提升优先级
           $CXX_FLAGS = "-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -D_HAS_DEPRECATED_RESULT_OF -D_CRT_SECURE_NO_WARNINGS"
-          
-          # 关键修复：显式添加 Z3 搜索路径
-          $CXX_FLAGS += " -isystem `"$Z3_INC`""
+          $CXX_FLAGS += " -I`"$Z3_INC`"" 
           
           if ($null -ne $OLD_MSVC) {
-             $OLD_MSVC_INC = "$OLD_MSVC/include".Replace('\', '/')
+             $OLD_MSVC_INC = "$OLD_MSVC\include"
              $CXX_FLAGS += " -isystem `"$OLD_MSVC_INC`""
           }
 
