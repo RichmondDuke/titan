@@ -138,6 +138,12 @@ jobs:
           $ConfigHpp = "#ifndef TRITON_CONFIG_HPP`n#define TRITON_CONFIG_HPP`n#define TRITON_Z3_INTERFACE`n#endif"
           $ConfigHpp | Set-Content -Path "triton-sdk/include/triton/config.hpp" -Encoding UTF8
 
+      - name: Activate VS 2019 Target
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          toolset: "14.29" # 这会强制将 v142 的路径压入 PATH 和 INCLUDE 
+
+          
       - name: Configure CMake
         shell: pwsh
         run: |
