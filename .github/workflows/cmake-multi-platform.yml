@@ -26,54 +26,77 @@ jobs:
           channels: conda-forge,defaults
 
       - name: Install Dependencies (Conda)
+        # 锁定 LLVM 15.0.7 以匹配项目代码要求
         run: |
           conda install -y cmake ninja llvmdev=15.0.7 clangdev=15.0.7 fmt zlib zstd range-v3 nlohmann_json
         shell: pwsh
 
-      - name: Download and Extract Triton (7z)
+      - name: Setup Triton SDK (v0.9 Binary + Headers Patch)
+        # 因为 v0.9 的 7z 包只有 DLL 没有头文件，我们需要手动补全开发环境
         run: |
+          # 1. 下载并解压二进制
           $URL = "https://github.com/JonathanSalwan/Triton/releases/download/v0.9/triton-x64-vs2019-py37.release.7z"
-          Write-Host "Downloading Triton from $URL..."
           Invoke-WebRequest -Uri $URL -OutFile triton.7z
-          
-          # 使用系统自带的 7z 程序解压
-          & "7z.exe" x triton.7z -o"triton-deps" -y
-          
-          # 验证解压后的内容（方便排查目录结构）
-          ls triton-deps
+          & "7z.exe" x triton.7z -o"triton-sdk" -y
+
+          # 2. 补全头文件 (从源码镜像拉取)
+          git clone --depth 1 https://github.com/JonathanSalwan/Triton.git triton-src
+          mkdir triton-sdk\include
+          xcopy /E /I triton-src\src\libtriton\includes\* triton-sdk\include\
+
+          # 3. 整理目录结构
+          mkdir triton-sdk\lib
+          move triton-sdk\triton.lib triton-sdk\lib\
+          mkdir triton-sdk\bin
+          move triton-sdk\*.dll triton-sdk\bin\
+
+          # 4. 现场生成 tritonConfig.cmake 骗过 CMake 的 find_package
+          $SDK_PATH = "$env:GITHUB_WORKSPACE/triton-sdk".Replace('\', '/')
+          $ConfigContent = @"
+set(triton_INCLUDE_DIRS "$SDK_PATH/include")
+set(triton_LIBRARIES "$SDK_PATH/lib/triton.lib")
+set(triton_FOUND TRUE)
+add_library(triton SHARED IMPORTED)
+set_target_properties(triton PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "`\${triton_INCLUDE_DIRS}"
+    IMPORTED_IMPLIB "`\${triton_LIBRARIES}"
+    IMPORTED_LOCATION "$SDK_PATH/bin/triton.dll"
+)
+add_library(Triton::Triton ALIAS triton)
+"@
+          mkdir triton-sdk\cmake
+          $ConfigContent | Out-File triton-sdk\cmake\tritonConfig.cmake -Encoding UTF8
         shell: pwsh
 
       - name: Configure CMake
         run: |
           $LLVM_PATH = "$env:CONDA_PREFIX/Library/lib/cmake/llvm"
-          # 关键点：Triton 0.9 二进制包可能没有提供 CMake 配置文件
-          # 我们直接把头文件和库文件的路径传给 CMake
-          $TRITON_ROOT = "$env:GITHUB_WORKSPACE/triton-deps"
+          $TRITON_CMAKE_DIR = "$env:GITHUB_WORKSPACE/triton-sdk/cmake"
           
           cmake -B build -S . -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_PREFIX_PATH="$env:CONDA_PREFIX/Library;$TRITON_ROOT" `
+            -DCMAKE_PREFIX_PATH="$env:CONDA_PREFIX/Library" `
             -DLLVM_DIR=$LLVM_PATH `
+            -Dtriton_DIR=$TRITON_CMAKE_DIR `
+            -DTriton_DIR=$TRITON_CMAKE_DIR `
             -DCMAKE_C_COMPILER="$env:CONDA_PREFIX/Library/bin/clang.exe" `
-            -DCMAKE_CXX_COMPILER="$env:CONDA_PREFIX/Library/bin/clang++.exe" `
-            -DTRITON_INCLUDE_DIRS="$TRITON_ROOT/include" `
-            -DTRITON_LIBRARIES="$TRITON_ROOT/libs/triton.lib"
+            -DCMAKE_CXX_COMPILER="$env:CONDA_PREFIX/Library/bin/clang++.exe"
         shell: pwsh
 
       - name: Build Project
         run: |
-          $env:PATH = "$env:CONDA_PREFIX/Library/bin;$env:GITHUB_WORKSPACE/triton-deps/bin;$env:PATH"
+          # 运行时需要能找到 LLVM 和 Triton 的 DLL
+          $env:PATH = "$env:CONDA_PREFIX/Library/bin;$env:GITHUB_WORKSPACE/triton-sdk/bin;$env:PATH"
           cmake --build build --config Release
         shell: pwsh
 
       - name: Organize and Zip Artifacts
         run: |
           if (!(Test-Path dist)) { mkdir dist }
+          # 收集生成的产物
           Get-ChildItem -Path build -Include *.exe, *.dll, *.sys -Recurse | Copy-Item -Destination dist\
-          # 尝试拷贝解压出来的 bin 目录下的 dll
-          if (Test-Path "triton-deps/bin") {
-            Get-ChildItem -Path "triton-deps/bin" -Include *.dll | Copy-Item -Destination dist\
-          }
+          # 额外拷贝 Triton 运行所需的 DLL
+          Copy-Item "triton-sdk/bin/*.dll" -Destination dist\
           Compress-Archive -Path dist\* -DestinationPath titan-windows-x64.zip -Force
         shell: pwsh
 
@@ -82,6 +105,10 @@ jobs:
         with:
           tag_name: continuous-build
           name: Continuous Build (Latest)
+          body: |
+            Built with LLVM 15.0.7 and Triton v0.9 (SDK Patcher).
+            - Compiler: Clang 15
+            - Triton: v0.9 Binary + Header Patch
           files: titan-windows-x64.zip
           overwrite: true
         env:
