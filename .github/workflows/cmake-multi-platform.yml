@@ -38,42 +38,57 @@ jobs:
           Invoke-WebRequest -Uri $URL -OutFile triton.7z
           & "7z.exe" x triton.7z -o"triton-sdk" -y
 
-          # 2. 补全头文件 (二进制包缺失，从源码拉取)
+          # 2. 补全头文件
           git clone --depth 1 https://github.com/JonathanSalwan/Triton.git triton-src
-          mkdir triton-sdk/include
-          xcopy /E /I triton-src\src\libtriton\includes\* triton-sdk\include\
+          if (!(Test-Path "triton-sdk/include/triton")) { New-Item -ItemType Directory -Path "triton-sdk/include/triton" -Force }
+          # 修正拷贝逻辑：确保 triton 文件夹下的内容直接进入 include/triton
+          xcopy /E /I /Y triton-src\src\libtriton\includes\triton\* triton-sdk\include\triton\
 
-          # 3. 整理 SDK 目录结构
-          if (!(Test-Path "triton-sdk/lib")) { mkdir triton-sdk/lib }
+          # 3. 手动伪造 config.hpp (改用数组方式写入，避开 @ 符号)
+          $ConfigLines = @(
+            "#ifndef TRITON_CONFIG_HPP",
+            "#define TRITON_CONFIG_HPP",
+            "",
+            "/* Triton 编译选项开关 */",
+            "#define TRITON_Z3_INTERFACE",
+            "/* #undef TRITON_BITWUZLA_INTERFACE */",
+            "/* #undef TRITON_PYTHON_BINDINGS */",
+            "",
+            "#endif /* TRITON_CONFIG_HPP */"
+          )
+          $ConfigLines | Set-Content -Path "triton-sdk/include/triton/config.hpp" -Encoding UTF8
+
+          # 4. 整理 SDK 目录结构
+          if (!(Test-Path "triton-sdk/lib")) { New-Item -ItemType Directory -Path "triton-sdk/lib" -Force }
           if (Test-Path "triton-sdk/triton.lib") { Move-Item "triton-sdk/triton.lib" "triton-sdk/lib/" -Force }
-          if (!(Test-Path "triton-sdk/bin")) { mkdir triton-sdk/bin }
+          if (!(Test-Path "triton-sdk/bin")) { New-Item -ItemType Directory -Path "triton-sdk/bin" -Force }
           if (Test-Path "triton-sdk/triton.dll") { Move-Item "triton-sdk/*.dll" "triton-sdk/bin/" -Force }
 
-          # 4. 动态生成 tritonConfig.cmake (使用绝对路径)
+          # 5. 动态生成 tritonConfig.cmake
           $ABS_SDK_PATH = "$env:GITHUB_WORKSPACE/triton-sdk".Replace('\', '/')
-          $ConfigContent = "set(triton_INCLUDE_DIRS `"$ABS_SDK_PATH/include`")`n" +
-                           "set(triton_LIBRARIES `"$ABS_SDK_PATH/lib/triton.lib`")`n" +
-                           "set(triton_FOUND TRUE)`n" +
-                           "if(NOT TARGET triton_imp)`n" +
-                           "    add_library(triton_imp SHARED IMPORTED)`n" +
-                           "    set_target_properties(triton_imp PROPERTIES `n" +
-                           "        INTERFACE_INCLUDE_DIRECTORIES `"$ABS_SDK_PATH/include`" `n" +
-                           "        IMPORTED_IMPLIB `"$ABS_SDK_PATH/lib/triton.lib`" `n" +
-                           "        IMPORTED_LOCATION `"$ABS_SDK_PATH/bin/triton.dll`" `n" +
-                           "    )`n" +
-                           "endif()`n" +
-                           "if(NOT TARGET triton::triton)`n" +
-                           "    add_library(triton::triton ALIAS triton_imp)`n" +
-                           "endif()"
-          
-          if (!(Test-Path "triton-sdk/cmake")) { mkdir triton-sdk/cmake }
-          $ConfigContent | Out-File -FilePath "triton-sdk/cmake/tritonConfig.cmake" -Encoding utf8
+          $CmakeLines = @(
+            "set(triton_INCLUDE_DIRS `"$ABS_SDK_PATH/include`")",
+            "set(triton_LIBRARIES `"$ABS_SDK_PATH/lib/triton.lib`")",
+            "set(triton_FOUND TRUE)",
+            "if(NOT TARGET triton_imp)",
+            "    add_library(triton_imp SHARED IMPORTED)",
+            "    set_target_properties(triton_imp PROPERTIES",
+            "        INTERFACE_INCLUDE_DIRECTORIES `"$ABS_SDK_PATH/include`"",
+            "        IMPORTED_IMPLIB `"$ABS_SDK_PATH/lib/triton.lib`"",
+            "        IMPORTED_LOCATION `"$ABS_SDK_PATH/bin/triton.dll`"",
+            "    )",
+            "endif()",
+            "if(NOT TARGET triton::triton)",
+            "    add_library(triton::triton ALIAS triton_imp)",
+            "endif()"
+          )
+          if (!(Test-Path "triton-sdk/cmake")) { New-Item -ItemType Directory -Path "triton-sdk/cmake" -Force }
+          $CmakeLines | Set-Content -Path "triton-sdk/cmake/tritonConfig.cmake" -Encoding UTF8
 
-          # 5. 【关键】强力注入：把配置文件塞进 Conda 目录，确保 find_package(triton) 必定成功
+          # 6. 强力注入
           $CONDA_CMAKE_DEST = "$env:CONDA_PREFIX/Library/lib/cmake/triton"
           if (!(Test-Path $CONDA_CMAKE_DEST)) { New-Item -ItemType Directory -Path $CONDA_CMAKE_DEST -Force }
           Copy-Item "triton-sdk/cmake/tritonConfig.cmake" "$CONDA_CMAKE_DEST/tritonConfig.cmake" -Force
-          Write-Host "Triton Config Injected to $CONDA_CMAKE_DEST"
 
       - name: Configure CMake
         shell: pwsh
