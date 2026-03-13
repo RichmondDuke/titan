@@ -50,9 +50,15 @@ jobs:
           # 核心补丁参数
           extra_args = [
               '-mlong-double-80', 
-              '-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH', 
-              '-fms-compatibility', 
-              '-fms-extensions'
+              '-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH',
+              '-fms-compatibility',
+              '-fms-extensions',
+              # --- 新增下面这两行 ---
+              '-D_CRT_USE_BUILTIN_OFFSETOF',
+              '-D__STDCPP_WANT_MATH_SPEC_FUNCS__=0',
+              # 强制让 MSVC 忽略对 long double 的 bit_cast 检查
+              '-D_INTERNAL_BIT_CAST_SUPPORTED=0',
+              '-D_HAS_CONSTEXPR_BIT_CAST=0'
           ]
           
           # 根据脚本名称判断使用哪个真实编译器
@@ -158,6 +164,7 @@ jobs:
             "-DCMAKE_PREFIX_PATH=$env:CONDA_PREFIX/Library",
             "-DCMAKE_C_COMPILER=$env:CONDA_PREFIX/Library/bin/clang.bat",
             "-DCMAKE_CXX_COMPILER=$env:CONDA_PREFIX/Library/bin/clang++.bat",
+            "-DCMAKE_CXX_FLAGS=-I`"$Z3_INC`" -mlong-double-80 -std=c++17",
             "-Dtriton_DIR=$TRITON_DIR", 
             "-DCMAKE_EXE_LINKER_FLAGS=$Z3_LIB",
             # 确保全局能搜到 Z3 头文件
