@@ -23,48 +23,51 @@ jobs:
       - name: Setup MSVC Dev Cmd
         uses: ilammy/msvc-dev-cmd@v1
 
-      # Ensure we can install LLVM 15 even if a newer LLVM is preinstalled on windows-latest
-      - name: Install LLVM 15 via Chocolatey (allow downgrade)
-        shell: pwsh
-        run: |
-          choco install -y llvm --version 15.0.7 --allow-downgrade --force
-
-      - name: Locate LLVM 15 LLVMConfig.cmake
-        shell: pwsh
-        run: |
-          # Try to find LLVM 15 specifically (avoid accidentally picking LLVM 20)
-          $candidates = @()
-          $candidates += Get-ChildItem -Path "C:\Program Files" -Recurse -Filter "LLVMConfig.cmake" -ErrorAction SilentlyContinue
-          $candidates += Get-ChildItem -Path "C:\ProgramData\chocolatey" -Recurse -Filter "LLVMConfig.cmake" -ErrorAction SilentlyContinue
-
-          if (-not $candidates -or $candidates.Count -eq 0) {
-            throw "LLVMConfig.cmake not found after LLVM install"
-          }
-
-          # Prefer paths that look like LLVM 15, otherwise take the first one
-          $picked = $candidates | Where-Object { $_.FullName -match "15" } | Select-Object -First 1
-          if (-not $picked) { $picked = $candidates | Select-Object -First 1 }
-
-          $llvmDir = $picked.Directory.FullName
-          Write-Host "Picked LLVMConfig.cmake: $($picked.FullName)"
-          Write-Host "Using LLVM_DIR=$llvmDir"
-
-          "LLVM_DIR=$llvmDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-          # Ensure the corresponding clang is on PATH for later intrinsics step
-          $clangExe = Get-ChildItem -Path ($picked.FullName | Split-Path -Parent | Split-Path -Parent | Split-Path -Parent) -Recurse -Filter "clang.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($clangExe) {
-            Write-Host "Found clang at: $($clangExe.FullName)"
-            $clangBin = Split-Path $clangExe.FullName -Parent
-            $clangBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          } else {
-            Write-Host "Warning: clang.exe not found near LLVMConfig.cmake; will rely on PATH later."
-          }
-
       - name: Install tools (7zip)
         shell: pwsh
         run: |
           choco install -y 7zip
+
+      # LLVM 15 via Conda (conda-forge), which includes lib/cmake/llvm/LLVMConfig.cmake
+      - name: Setup Miniconda
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          auto-update-conda: true
+          activate-environment: llvm15
+          python-version: "3.11"
+          channels: conda-forge
+          channel-priority: strict
+          use-mamba: true
+
+      - name: Install LLVM 15 (conda-forge)
+        shell: pwsh
+        run: |
+          mamba install -y llvm=15.* clang=15.* lld=15.*
+
+      - name: Locate LLVMConfig.cmake (from conda)
+        shell: pwsh
+        run: |
+          # CONDA_PREFIX is set by setup-miniconda
+          if (-not $env:CONDA_PREFIX) { throw "CONDA_PREFIX is not set" }
+
+          $cfg = Get-ChildItem -Path $env:CONDA_PREFIX -Recurse -Filter "LLVMConfig.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $cfg) {
+            Write-Host "Listing conda env root (depth 4):"
+            Get-ChildItem -Path $env:CONDA_PREFIX -Recurse -Depth 4 | Select-Object FullName
+            throw "LLVMConfig.cmake not found under CONDA_PREFIX=$env:CONDA_PREFIX"
+          }
+
+          $llvmDir = $cfg.Directory.FullName
+          Write-Host "Found LLVMConfig.cmake at: $($cfg.FullName)"
+          Write-Host "Using LLVM_DIR=$llvmDir"
+          "LLVM_DIR=$llvmDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          # Ensure conda bin is on PATH for clang.exe
+          $condaBin = Join-Path $env:CONDA_PREFIX "Library\bin"
+          if (Test-Path $condaBin) {
+            Write-Host "Adding conda LLVM bin to PATH: $condaBin"
+            $condaBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
 
       - name: Download & extract Triton prebuilt
         shell: pwsh
@@ -78,11 +81,7 @@ jobs:
           Write-Host "Triton extracted to ${{ env.TRITON_DIR }}"
           Get-ChildItem -Recurse -Depth 3 "${{ env.TRITON_DIR }}" | Select-Object FullName
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
+      # Conan deps for fmt/range-v3/z3/capstone (binary when available)
       - name: Install Conan 2
         shell: pwsh
         run: |
