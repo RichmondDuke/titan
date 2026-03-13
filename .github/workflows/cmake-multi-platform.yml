@@ -18,31 +18,38 @@ jobs:
           submodules: recursive
 
       - name: Setup Conda Environment
-        # 使用 Miniconda 快速搭建隔离的 C++ 编译环境
         uses: conda-incubator/setup-miniconda@v3
         with:
           auto-update-conda: true
           activate-environment: titan-build-env
           channels: conda-forge,defaults
 
-      - name: Install Exact Dependencies via Conda
-        # 这里的 llvmdev 包含了至关重要的 LLVMConfig.cmake 等开发文件
-        # 它直接提供编译好的二进制文件，免去了漫长的 CI 编译等待
+      - name: Install Dependencies
+        # 补全了 fmt。注：如果项目还需要 triton，conda-forge 也有提供。
+        # 这里一次性安装所有 CMake 需要的开发组件
         run: |
-          conda install -y cmake ninja compiler-rt clangdev=15.0.7 llvmdev=15.0.7
+          conda install -y cmake ninja llvmdev=15.0.7 clangdev=15.0.7 fmt
         shell: pwsh
 
       - name: Configure CMake
-        # 直接使用默认配置。Conda 环境激活后，CMake 会自动在环境路径下找到 LLVM 15
-        run: cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release
+        # 通过 $env:CONDA_PREFIX 自动定位所有已安装库的路径
+        run: |
+          cmake -B build -S . -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_PREFIX_PATH="$env:CONDA_PREFIX/Library" `
+            -DCMAKE_C_COMPILER="$env:CONDA_PREFIX/Library/bin/clang.exe" `
+            -DCMAKE_CXX_COMPILER="$env:CONDA_PREFIX/Library/bin/clang++.exe"
         shell: pwsh
 
       - name: Build Project
-        run: cmake --build build --config Release
+        # 确保环境变量里有 bin 目录，以便自定义脚本能找到 clang++
+        run: |
+          $env:PATH = "$env:CONDA_PREFIX/Library/bin;$env:PATH"
+          cmake --build build --config Release
         shell: pwsh
 
-      - name: Upload Build Artifacts
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: titan-release-windows
-          path: build/Release/ # 根据你实际生成的执行文件路径可微调
+          name: Titan-Windows-Binary
+          path: build/*.exe
