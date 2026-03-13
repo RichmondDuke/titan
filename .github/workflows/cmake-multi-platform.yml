@@ -55,13 +55,21 @@ jobs:
           $ConfigContent = "set(triton_INCLUDE_DIRS `"$SDK_PATH/include`")`n" +
                            "set(triton_LIBRARIES `"$SDK_PATH/lib/triton.lib`")`n" +
                            "set(triton_FOUND TRUE)`n" +
-                           "add_library(triton SHARED IMPORTED)`n" +
-                           "set_target_properties(triton PROPERTIES `n" +
-                           "    INTERFACE_INCLUDE_DIRECTORIES `"`${triton_INCLUDE_DIRS}`" `n" +
-                           "    IMPORTED_IMPLIB `"`${triton_LIBRARIES}`" `n" +
+                           "add_library(triton_imp SHARED IMPORTED)`n" +
+                           "set_target_properties(triton_imp PROPERTIES `n" +
+                           "    INTERFACE_INCLUDE_DIRECTORIES `"`$SDK_PATH/include`" `n" +
+                           "    IMPORTED_IMPLIB `"`$SDK_PATH/lib/triton.lib`" `n" +
                            "    IMPORTED_LOCATION `"$SDK_PATH/bin/triton.dll`" `n" +
                            ")`n" +
-                           "add_library(Triton::Triton ALIAS triton)"
+                           "if(NOT TARGET triton::triton)`n" +
+                           "    add_library(triton::triton ALIAS triton_imp)`n" +
+                           "endif()`n" +
+                           "if(NOT TARGET Triton::Triton)`n" +
+                           "    add_library(Triton::Triton ALIAS triton_imp)`n" +
+                           "endif()"
+          
+          if (!(Test-Path "triton-sdk/cmake")) { mkdir triton-sdk/cmake }
+          $ConfigContent | Out-File -FilePath "triton-sdk/cmake/tritonConfig.cmake" -Encoding utf8
           
           if (!(Test-Path "triton-sdk/cmake")) { mkdir triton-sdk/cmake }
           $ConfigContent | Out-File -FilePath "triton-sdk/cmake/tritonConfig.cmake" -Encoding utf8
@@ -78,8 +86,6 @@ jobs:
             -DCMAKE_PREFIX_PATH="$env:CONDA_PREFIX/Library;$TRITON_CMAKE_DIR" `
             -DLLVM_DIR="$LLVM_PATH" `
             -Dtriton_DIR="$TRITON_CMAKE_DIR" `
-            -DTriton_DIR="$TRITON_CMAKE_DIR" `
-            -Dtriton_FOUND=ON `
             -DCMAKE_C_COMPILER="$env:CONDA_PREFIX/Library/bin/clang.exe" `
             -DCMAKE_CXX_COMPILER="$env:CONDA_PREFIX/Library/bin/clang++.exe"
 
