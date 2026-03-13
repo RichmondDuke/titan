@@ -23,11 +23,52 @@ jobs:
       - name: Setup MSVC Dev Cmd
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Install LLVM 15 (clang + LLVMConfig.cmake)
-        uses: KyleMayes/install-llvm-action@v2
+      - name: Setup Miniconda (conda-forge)
+        uses: conda-incubator/setup-miniconda@v3
         with:
-          version: "15.0.7"
-          directory: ${{ runner.temp }}\llvm
+          auto-update-conda: true
+          activate-environment: llvm15
+          python-version: "3.11"
+          channels: conda-forge
+          channel-priority: strict
+
+      - name: Install LLVM 15 dev (conda-forge llvmdev)
+        shell: bash -l {0}
+        run: |
+          set -euo pipefail
+          conda info
+          conda install -y "llvmdev=15.*" "clang=15.*" "lld=15.*"
+          echo "CONDA_PREFIX=$CONDA_PREFIX"
+          test -n "${CONDA_PREFIX:-}"
+
+      - name: Export LLVM_DIR (find LLVMConfig.cmake in conda env)
+        shell: pwsh
+        run: |
+          if (-not $env:CONDA_PREFIX) {
+            throw "CONDA_PREFIX is not set (conda env not activated?)"
+          }
+
+          # Ensure conda LLVM tools (clang.exe etc.) are on PATH for later steps
+          $condaBin = Join-Path $env:CONDA_PREFIX "Library\bin"
+          if (Test-Path $condaBin) {
+            $condaBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+
+          # Find LLVMConfig.cmake (llvmdev should provide it)
+          $cfg = Get-ChildItem -Path $env:CONDA_PREFIX -Recurse -Filter "LLVMConfig.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $cfg) {
+            Write-Host "ERROR: LLVMConfig.cmake not found under $env:CONDA_PREFIX"
+            Write-Host "Debug: listing directories that look like '*\cmake\llvm' (depth-limited best-effort)"
+            Get-ChildItem -Path $env:CONDA_PREFIX -Recurse -Directory -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match "\\cmake\\llvm$" } |
+              Select-Object -First 50 FullName
+            throw "LLVMConfig.cmake not found"
+          }
+
+          $llvmDir = $cfg.Directory.FullName
+          Write-Host "Found LLVMConfig.cmake at: $($cfg.FullName)"
+          Write-Host "Exporting LLVM_DIR=$llvmDir"
+          "LLVM_DIR=$llvmDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install tools (7zip)
         shell: pwsh
@@ -46,7 +87,7 @@ jobs:
           Write-Host "Triton extracted to ${{ env.TRITON_DIR }}"
           Get-ChildItem -Recurse -Depth 2 "${{ env.TRITON_DIR }}" | Select-Object FullName
 
-      - name: Setup Python
+      - name: Setup Python (for Conan)
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -71,25 +112,17 @@ jobs:
             -s compiler.cppstd=20 `
             -b missing
 
-      - name: Debug -> list Conan output folder
-        shell: pwsh
-        run: |
-          Write-Host "Listing $env:BUILD_DIR\conan"
-          Get-ChildItem -Force -Recurse "$env:BUILD_DIR\conan" | Select-Object FullName
-
       - name: Configure (CMake)
         shell: pwsh
         run: |
-          $llvmDir = "${{ runner.temp }}\llvm"
-          $llvmCmake = Join-Path $llvmDir "lib\cmake\llvm"
-
           $conanGen = Resolve-Path "$env:BUILD_DIR\conan\build\generators"
           $toolchain = Join-Path $conanGen "conan_toolchain.cmake"
 
-          # IMPORTANT: Use forward slashes for CMake list variables to avoid backslash escapes like \a, \t, etc.
+          # Use forward slashes for CMake list/path variables to avoid backslash escapes like \a, \t, etc.
           $ws = "${{ github.workspace }}".Replace('\', '/')
           $cmakeModules = "$ws/cmake"
           $tritonRoot = "${{ env.TRITON_DIR }}".Replace('\', '/')
+          $llvmDir = "$env:LLVM_DIR".Replace('\', '/')
 
           cmake -S . -B $env:BUILD_DIR `
             -DCMAKE_BUILD_TYPE=Release `
@@ -99,7 +132,7 @@ jobs:
             -DTRITON_ROOT="$tritonRoot" `
             -Dtriton_ROOT="$tritonRoot" `
             -Dtriton_DIR="$tritonRoot" `
-            -DLLVM_DIR="$($llvmCmake.Replace('\','/'))"
+            -DLLVM_DIR="$llvmDir"
 
       - name: Build titan.exe
         shell: pwsh
@@ -109,12 +142,13 @@ jobs:
       - name: Generate vmprotect64.ll (intrinsics)
         shell: pwsh
         run: |
-          $llvmDir = "${{ runner.temp }}\llvm"
-          $clang = Join-Path $llvmDir "bin\clang.exe"
-          if (!(Test-Path $clang)) { throw "clang not found at $clang" }
+          $clang = Get-Command clang.exe -ErrorAction SilentlyContinue
+          if (-not $clang) { throw "clang.exe not found in PATH" }
+
+          Write-Host "Using clang: $($clang.Source)"
 
           Push-Location intrinsics
-          & $clang `
+          & $clang.Source `
             -std=c++17 `
             -O3 `
             -Iremill/include `
@@ -129,19 +163,6 @@ jobs:
             -S main.cpp `
             -o vmprotect64.ll
           Pop-Location
-
-      - name: Add Triton bin to PATH (best-effort)
-        shell: pwsh
-        run: |
-          $binCandidates = @(
-            Join-Path "${{ env.TRITON_DIR }}" "bin"
-            Join-Path "${{ env.TRITON_DIR }}" "lib"
-          )
-          foreach ($p in $binCandidates) {
-            if (Test-Path $p) {
-              echo $p | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-            }
-          }
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
