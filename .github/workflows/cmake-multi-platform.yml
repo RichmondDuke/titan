@@ -43,33 +43,34 @@ jobs:
           mkdir triton-sdk/include
           xcopy /E /I triton-src\src\libtriton\includes\* triton-sdk\include\
 
-          # 3. 整理目录结构 (修正了 move 命令可能找不到文件的报错)
+          # 3. 整理目录结构
           if (!(Test-Path "triton-sdk/lib")) { mkdir triton-sdk/lib }
           if (Test-Path "triton-sdk/triton.lib") { Move-Item "triton-sdk/triton.lib" "triton-sdk/lib/" -Force }
           
           if (!(Test-Path "triton-sdk/bin")) { mkdir triton-sdk/bin }
           if (Test-Path "triton-sdk/triton.dll") { Move-Item "triton-sdk/*.dll" "triton-sdk/bin/" -Force }
 
-          # 4. 生成配置文件 (关键修复：通过这种方式避免 YAML 语法冲突)
-          $SDK_PATH = "$env:GITHUB_WORKSPACE/triton-sdk".Replace('\', '/')
-          $ConfigContent = "set(triton_INCLUDE_DIRS `"$SDK_PATH/include`")`n" +
-                           "set(triton_LIBRARIES `"$SDK_PATH/lib/triton.lib`")`n" +
+          # 4. 生成配置文件 (修正变量替换问题)
+          $ABS_SDK_PATH = "$env:GITHUB_WORKSPACE/triton-sdk".Replace('\', '/')
+          
+          # 使用单引号包裹内容，手动插入解析后的路径变量
+          $ConfigContent = "set(triton_INCLUDE_DIRS `"$ABS_SDK_PATH/include`")`n" +
+                           "set(triton_LIBRARIES `"$ABS_SDK_PATH/lib/triton.lib`")`n" +
                            "set(triton_FOUND TRUE)`n" +
-                           "add_library(triton_imp SHARED IMPORTED)`n" +
-                           "set_target_properties(triton_imp PROPERTIES `n" +
-                           "    INTERFACE_INCLUDE_DIRECTORIES `"`$SDK_PATH/include`" `n" +
-                           "    IMPORTED_IMPLIB `"`$SDK_PATH/lib/triton.lib`" `n" +
-                           "    IMPORTED_LOCATION `"$SDK_PATH/bin/triton.dll`" `n" +
-                           ")`n" +
+                           "if(NOT TARGET triton_imp)`n" +
+                           "    add_library(triton_imp SHARED IMPORTED)`n" +
+                           "    set_target_properties(triton_imp PROPERTIES `n" +
+                           "        INTERFACE_INCLUDE_DIRECTORIES `"$ABS_SDK_PATH/include`" `n" +
+                           "        IMPORTED_IMPLIB `"$ABS_SDK_PATH/lib/triton.lib`" `n" +
+                           "        IMPORTED_LOCATION `"$ABS_SDK_PATH/bin/triton.dll`" `n" +
+                           "    )`n" +
+                           "endif()`n" +
                            "if(NOT TARGET triton::triton)`n" +
                            "    add_library(triton::triton ALIAS triton_imp)`n" +
                            "endif()`n" +
                            "if(NOT TARGET Triton::Triton)`n" +
                            "    add_library(Triton::Triton ALIAS triton_imp)`n" +
                            "endif()"
-          
-          if (!(Test-Path "triton-sdk/cmake")) { mkdir triton-sdk/cmake }
-          $ConfigContent | Out-File -FilePath "triton-sdk/cmake/tritonConfig.cmake" -Encoding utf8
           
           if (!(Test-Path "triton-sdk/cmake")) { mkdir triton-sdk/cmake }
           $ConfigContent | Out-File -FilePath "triton-sdk/cmake/tritonConfig.cmake" -Encoding utf8
