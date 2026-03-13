@@ -23,29 +23,21 @@ jobs:
         with:
           auto-update-conda: true
           activate-environment: titan-build-env
+          # 核心：确保从 conda-forge 拉取预编译库
           channels: conda-forge,defaults
 
       - name: Install Dependencies (Conda)
-        # 强制锁定 LLVM 15 以匹配代码要求
+        # 1. 强制锁定 LLVM 15
+        # 2. 直接从 Conda 安装 libtriton（这是 Triton 的预编译二进制版本）
         run: |
-          conda install -y cmake ninja llvmdev=15.0.7 clangdev=15.0.7 fmt zlib zstd range-v3 nlohmann_json
-        shell: pwsh
-
-      - name: Download and Setup Triton Binary
-        # 直接从 GitHub 获取预编译的 Triton (假设版本为 1.0.0，请根据 Triton 仓库实际 Release 调整链接)
-        # 这样可以节省大量编译时间并避免 vcpkg 冲突
-        run: |
-          $TRITON_URL = "https://github.com/JonathanSalwan/Triton/releases/download/v1.0.0/triton-1.0.0-msvc-x64.zip"
-          Invoke-WebRequest -Uri $TRITON_URL -OutFile triton.zip
-          Expand-Archive -Path triton.zip -DestinationPath "$env:CONDA_PREFIX/Library" -Force
-          # 确保头文件和库文件在 CMake 默认搜索路径下
+          conda install -y cmake ninja llvmdev=15.0.7 clangdev=15.0.7 libtriton fmt zlib zstd range-v3 nlohmann_json
         shell: pwsh
 
       - name: Configure CMake
         run: |
+          # 指向 Conda 环境中的 LLVM 配置文件路径
           $LLVM_PATH = "$env:CONDA_PREFIX/Library/lib/cmake/llvm"
           
-          # 注意：移除了 VCPKG 相关的 Toolchain 设置，改为纯前缀搜索
           cmake -B build -S . -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_PREFIX_PATH="$env:CONDA_PREFIX/Library" `
@@ -56,6 +48,7 @@ jobs:
 
       - name: Build Project
         run: |
+          # 运行时需要能找到 Conda 的 bin 目录下的 dll
           $env:PATH = "$env:CONDA_PREFIX/Library/bin;$env:PATH"
           cmake --build build --config Release
         shell: pwsh
@@ -63,11 +56,17 @@ jobs:
       - name: Organize and Zip Artifacts
         run: |
           if (!(Test-Path dist)) { mkdir dist }
-          # 搜集成果，包括可能需要的 Triton.dll
+          
+          # 复制生成的程序
           Get-ChildItem -Path build -Include *.exe, *.dll, *.sys -Recurse | Copy-Item -Destination dist\
-          if (Test-Path "$env:CONDA_PREFIX/Library/bin/triton.dll") {
-            Copy-Item "$env:CONDA_PREFIX/Library/bin/triton.dll" -Destination dist\
+          
+          # 关键：从 Conda 环境中提取 Triton 运行所需的 DLL
+          # Triton 在 Windows 上通常叫 triton.dll
+          $TRITON_DLL = "$env:CONDA_PREFIX/Library/bin/triton.dll"
+          if (Test-Path $TRITON_DLL) {
+              Copy-Item $TRITON_DLL -Destination dist\
           }
+
           Compress-Archive -Path dist\* -DestinationPath titan-windows-x64.zip -Force
         shell: pwsh
 
@@ -76,6 +75,10 @@ jobs:
         with:
           tag_name: continuous-build
           name: Continuous Build (Latest)
+          body: |
+            Built with Pre-compiled Dependencies.
+            - LLVM: 15.0.7 (via Conda)
+            - Triton: via Conda-forge (libtriton)
           files: titan-windows-x64.zip
           overwrite: true
         env:
