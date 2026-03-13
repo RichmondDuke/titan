@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest  # 从 windows-latest 改为 windows-2019
+    runs-on: windows-latest
 
     steps:
       - name: Checkout Repository
@@ -33,27 +33,24 @@ jobs:
       - name: Setup Triton SDK (v0.9 Binary + Headers Patch)
         shell: pwsh
         run: |
-          # 1. 下载并解压
+          # 1. 下载并解压 Triton v0.9 二进制
           $URL = "https://github.com/JonathanSalwan/Triton/releases/download/v0.9/triton-x64-vs2019-py37.release.7z"
           Invoke-WebRequest -Uri $URL -OutFile triton.7z
           & "7z.exe" x triton.7z -o"triton-sdk" -y
 
-          # 2. 补全头文件
+          # 2. 补全头文件 (二进制包缺失，从源码拉取)
           git clone --depth 1 https://github.com/JonathanSalwan/Triton.git triton-src
           mkdir triton-sdk/include
           xcopy /E /I triton-src\src\libtriton\includes\* triton-sdk\include\
 
-          # 3. 整理目录结构
+          # 3. 整理 SDK 目录结构
           if (!(Test-Path "triton-sdk/lib")) { mkdir triton-sdk/lib }
           if (Test-Path "triton-sdk/triton.lib") { Move-Item "triton-sdk/triton.lib" "triton-sdk/lib/" -Force }
-          
           if (!(Test-Path "triton-sdk/bin")) { mkdir triton-sdk/bin }
           if (Test-Path "triton-sdk/triton.dll") { Move-Item "triton-sdk/*.dll" "triton-sdk/bin/" -Force }
 
-          # 4. 生成配置文件 (修正变量替换问题)
+          # 4. 动态生成 tritonConfig.cmake (使用绝对路径)
           $ABS_SDK_PATH = "$env:GITHUB_WORKSPACE/triton-sdk".Replace('\', '/')
-          
-          # 使用单引号包裹内容，手动插入解析后的路径变量
           $ConfigContent = "set(triton_INCLUDE_DIRS `"$ABS_SDK_PATH/include`")`n" +
                            "set(triton_LIBRARIES `"$ABS_SDK_PATH/lib/triton.lib`")`n" +
                            "set(triton_FOUND TRUE)`n" +
@@ -67,36 +64,55 @@ jobs:
                            "endif()`n" +
                            "if(NOT TARGET triton::triton)`n" +
                            "    add_library(triton::triton ALIAS triton_imp)`n" +
-                           "endif()`n" +
-                           "if(NOT TARGET Triton::Triton)`n" +
-                           "    add_library(Triton::Triton ALIAS triton_imp)`n" +
                            "endif()"
           
           if (!(Test-Path "triton-sdk/cmake")) { mkdir triton-sdk/cmake }
           $ConfigContent | Out-File -FilePath "triton-sdk/cmake/tritonConfig.cmake" -Encoding utf8
 
+          # 5. 【关键】强力注入：把配置文件塞进 Conda 目录，确保 find_package(triton) 必定成功
+          $CONDA_CMAKE_DEST = "$env:CONDA_PREFIX/Library/lib/cmake/triton"
+          if (!(Test-Path $CONDA_CMAKE_DEST)) { New-Item -ItemType Directory -Path $CONDA_CMAKE_DEST -Force }
+          Copy-Item "triton-sdk/cmake/tritonConfig.cmake" "$CONDA_CMAKE_DEST/tritonConfig.cmake" -Force
+          Write-Host "Triton Config Injected to $CONDA_CMAKE_DEST"
+
       - name: Configure CMake
         shell: pwsh
         run: |
-          # 强制指定 VS 2019 的工具链路径（GitHub 的 windows-latest 镜像里其实装了多个版本的工具链）
-          $MSVC_PATH = "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Tools/MSVC/14.29.30133" # 这是一个兼容性较好的版本
+          # 锁定 LLVM 路径
+          $LLVM_PATH = "$env:CONDA_PREFIX/Library/lib/cmake/llvm"
           
-          cmake -B build -S . -G Ninja `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_CXX_FLAGS="-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -D_HAS_DEPRECATED_RESULT_OF" `
-            -DMSVC_TOOLSET_VERSION=142 `
-            # ... 其他参数保持不变 ...
-            -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_PREFIX_PATH="$env:CONDA_PREFIX/Library;$TRITON_CMAKE_DIR" `
-            -DLLVM_DIR="$LLVM_PATH" `
-            -Dtriton_DIR="$TRITON_CMAKE_DIR" `
-            -DCMAKE_C_COMPILER="$env:CONDA_PREFIX/Library/bin/clang.exe" `
-            -DCMAKE_CXX_COMPILER="$env:CONDA_PREFIX/Library/bin/clang++.exe" `
-            -DCMAKE_CXX_FLAGS="-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -D_HAS_DEPRECATED_RESULT_OF -D_CRT_SECURE_NO_WARNINGS"
+          # 指定 MSVC 旧版工具链路径，避免 Clang 15 与 MSVC 14.44 的冲突
+          # GitHub windows-latest 镜像通常保留了 14.29 (VS2019 兼容版)
+          $MSVC_VER = "14.29.30133"
+          $MSVC_ROOT = "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Tools/MSVC/$MSVC_VER"
+          
+          # 使用数组传递参数，防止续行符 ` 导致的识别错误
+          $cmakeArgs = @(
+            "-B", "build",
+            "-S", ".",
+            "-G", "Ninja",
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DCMAKE_PREFIX_PATH=$env:CONDA_PREFIX/Library",
+            "-DLLVM_DIR=$LLVM_PATH",
+            "-DCMAKE_C_COMPILER=$env:CONDA_PREFIX/Library/bin/clang.exe",
+            "-DCMAKE_CXX_COMPILER=$env:CONDA_PREFIX/Library/bin/clang++.exe",
+            # 注入宏：允许版本不匹配 + 抑制废弃警告
+            "-DCMAKE_CXX_FLAGS=-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -D_HAS_DEPRECATED_RESULT_OF -D_CRT_SECURE_NO_WARNINGS",
+            "-DMSVC_TOOLSET_VERSION=142"
+          )
+
+          # 如果指定路径存在，则强制环境变量指向旧版工具链
+          if (Test-Path $MSVC_ROOT) {
+             $env:VCToolsInstallDir = "$MSVC_ROOT/"
+             Write-Host "Forcing MSVC Toolset: $MSVC_VER"
+          }
+
+          & cmake @cmakeArgs
 
       - name: Build Project
         shell: pwsh
         run: |
+          # 确保运行时能找到 LLVM 和 Triton 的 DLL
           $env:PATH = "$env:CONDA_PREFIX/Library/bin;$env:GITHUB_WORKSPACE/triton-sdk/bin;$env:PATH"
           cmake --build build --config Release
 
@@ -104,7 +120,9 @@ jobs:
         shell: pwsh
         run: |
           if (!(Test-Path dist)) { mkdir dist }
+          # 收集编译产物
           Get-ChildItem -Path build -Include *.exe, *.dll, *.sys -Recurse | Copy-Item -Destination dist\
+          # 收集依赖库
           if (Test-Path "triton-sdk/bin") {
             Copy-Item "triton-sdk/bin/*.dll" -Destination dist\
           }
