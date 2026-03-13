@@ -23,11 +23,14 @@ jobs:
         with:
           auto-update-conda: true
           activate-environment: titan-build-env
+          # 增加 conda-forge 优先级
           channels: conda-forge,defaults
 
       - name: Install Dependencies (Conda)
+        # 核心改动：不再锁死 15.0.7，改用最新的 llvmdev 和 clangdev (目前通常是 19.x)
+        # 这将解决 "Unexpected compiler version" 的报错
         run: |
-          conda install -y cmake ninja llvmdev=15.0.7 clangdev=15.0.7 fmt zlib zstd range-v3 nlohmann_json
+          conda install -y cmake ninja llvmdev clangdev fmt zlib zstd range-v3 nlohmann_json
         shell: pwsh
 
       - name: Install Triton (vcpkg)
@@ -53,12 +56,9 @@ jobs:
         shell: pwsh
 
       - name: Organize and Zip Artifacts
-        # 这一步会收集所有可执行文件、库文件和配置文件并打包
         run: |
           mkdir dist
-          # 递归收集 exe, dll, sys 和 json 配置文件（根据需要增删后缀）
           Get-ChildItem -Path build -Include *.exe, *.dll, *.sys, *.json -Recurse | Copy-Item -Destination dist\
-          # 将所有收集到的文件打成一个 zip 包
           Compress-Archive -Path dist\* -DestinationPath titan-windows-x64.zip
         shell: pwsh
 
@@ -68,10 +68,10 @@ jobs:
           tag_name: continuous-build
           name: Continuous Build (Latest)
           body: |
-            Automatically built from the latest commit.
-            - Includes: Executables, DLLs, and required configs.
-            - Toolchain: Clang 15.0.7 & Triton (vcpkg).
-          files: titan-windows-x64.zip # 只上传这一个压缩包
+            Built with latest Clang compatible with MSVC STL.
+            - Toolchain: Clang (Latest from Conda)
+            - Dependencies: LLVM, Triton, Range-v3
+          files: titan-windows-x64.zip
           draft: false
           prerelease: false
         env:
