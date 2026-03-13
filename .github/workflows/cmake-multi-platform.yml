@@ -31,12 +31,12 @@ jobs:
           conda install -y cmake ninja llvmdev=15.0.7 clangdev=15.0.7 fmt zlib zstd range-v3 nlohmann_json
         shell: pwsh
 
-      - name: Hard Patch Clang (The Destroyer Strategy)
+      - name: Physically Patch Clang (C & C++ Distinguish)
         shell: pwsh
         run: |
           $CLANG_BIN = "$env:CONDA_PREFIX/Library/bin"
           
-          # 1. 彻底把原先的 .exe 挪走，确保 PATH 里找不到 clang++.exe
+          # 1. 备份真实的编译器
           if (Test-Path "$CLANG_BIN/clang++.exe") {
               Move-Item "$CLANG_BIN/clang++.exe" "$CLANG_BIN/clang++-real.exe" -Force
           }
@@ -44,29 +44,41 @@ jobs:
               Move-Item "$CLANG_BIN/clang.exe" "$CLANG_BIN/clang-real.exe" -Force
           }
 
-          # 2. 创建一个 python 包装器（Python 在 Windows Actions 里极其稳定且执行优先级高）
+          # 2. 创建一个通用的 Python 包装器，支持识别 C 或 C++ 模式
           $PyWrapper = @"
-          import sys, subprocess
-          # 强制注入参数
+          import sys, subprocess, os
+          # 核心补丁参数
           extra_args = [
               '-mlong-double-80', 
               '-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH', 
               '-fms-compatibility', 
               '-fms-extensions'
           ]
-          real_clang = r'$CLANG_BIN/clang++-real.exe'
-          subprocess.run([real_clang] + extra_args + sys.argv[1:], check=True)
+          
+          # 根据脚本名称判断使用哪个真实编译器
+          # 如果文件名包含 '++'，使用 clang++-real，否则使用 clang-real
+          invoked_as = os.path.basename(sys.argv[0]).lower()
+          if '++' in invoked_as:
+              real_compiler = r'$CLANG_BIN/clang++-real.exe'
+          else:
+              real_compiler = r'$CLANG_BIN/clang-real.exe'
+          
+          # 执行编译
+          result = subprocess.run([real_compiler] + extra_args + sys.argv[1:])
+          sys.exit(result.returncode)
           "@
           $PyWrapper | Set-Content "$CLANG_BIN/clang_wrapper.py"
 
-          # 3. 创建执行入口，这次我们直接生成 .exe（利用 PowerShell 的编译能力）
-          # 或者最简单的，创建一个 clang++.exe 的别名
-          # 这里推荐用简单的 .bat，但我们要确保删除所有干扰项
+          # 3. 创建入口 Batch 文件
+          # 这里的关键是把 %0 传进去，让 Python 知道是谁在调用它
           "@echo off`npython `"$CLANG_BIN/clang_wrapper.py`" %*" | Set-Content "$CLANG_BIN/clang++.bat"
           "@echo off`npython `"$CLANG_BIN/clang_wrapper.py`" %*" | Set-Content "$CLANG_BIN/clang.bat"
           
-          # 关键点：将环境里的 clang++.exe 占位，防止其他工具重新生成它
+          # 4. 删除可能干扰的 .exe（或者用假文件占位）
           "Fake" | Set-Content "$CLANG_BIN/clang++.exe" -ErrorAction SilentlyContinue
+          "Fake" | Set-Content "$CLANG_BIN/clang.exe" -ErrorAction SilentlyContinue
+
+          Write-Host "C and C++ compilers patched and distinguished."
 
       - name: Setup Z3 (v4.8.10 - ABI Stable)
         shell: pwsh
@@ -127,9 +139,9 @@ jobs:
             "-G", "Ninja",
             "-DCMAKE_BUILD_TYPE=Release",
             "-DCMAKE_PREFIX_PATH=$env:CONDA_PREFIX/Library",
+            # 明确分开指定 C 和 C++ 编译器
             "-DCMAKE_C_COMPILER=$env:CONDA_PREFIX/Library/bin/clang.bat",
             "-DCMAKE_CXX_COMPILER=$env:CONDA_PREFIX/Library/bin/clang++.bat",
-            # 指向我们刚刚创建 Config 文件的目录
             "-Dtriton_DIR=$TRITON_DIR", 
             "-DCMAKE_EXE_LINKER_FLAGS=$Z3_LIB",
             "-DCMAKE_CXX_FLAGS=-I`"$Z3_INC`""
