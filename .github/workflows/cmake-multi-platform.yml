@@ -31,8 +31,9 @@ jobs:
         shell: pwsh
 
       - name: Setup Triton SDK (v0.9 Binary + Headers Patch)
+        shell: pwsh
         run: |
-          # 1. 下载并解压二进制
+          # 1. 下载并解压
           $URL = "https://github.com/JonathanSalwan/Triton/releases/download/v0.9/triton-x64-vs2019-py37.release.7z"
           Invoke-WebRequest -Uri $URL -OutFile triton.7z
           & "7z.exe" x triton.7z -o"triton-sdk" -y
@@ -42,31 +43,31 @@ jobs:
           mkdir triton-sdk/include
           xcopy /E /I triton-src\src\libtriton\includes\* triton-sdk\include\
 
-          # 3. 整理目录结构
-          mkdir triton-sdk/lib
-          if (Test-Path "triton-sdk/triton.lib") { move triton-sdk/triton.lib triton-sdk/lib/ }
-          mkdir triton-sdk/bin
-          if (Test-Item "triton-sdk/*.dll") { move triton-sdk/*.dll triton-sdk/bin/ }
+          # 3. 整理目录结构 (修正了 move 命令可能找不到文件的报错)
+          if (!(Test-Path "triton-sdk/lib")) { mkdir triton-sdk/lib }
+          if (Test-Path "triton-sdk/triton.lib") { Move-Item "triton-sdk/triton.lib" "triton-sdk/lib/" -Force }
+          
+          if (!(Test-Path "triton-sdk/bin")) { mkdir triton-sdk/bin }
+          if (Test-Path "triton-sdk/triton.dll") { Move-Item "triton-sdk/*.dll" "triton-sdk/bin/" -Force }
 
-          # 4. 生成 tritonConfig.cmake (使用引号包裹防止 YAML 解析错误)
+          # 4. 生成配置文件 (关键修复：通过这种方式避免 YAML 语法冲突)
           $SDK_PATH = "$env:GITHUB_WORKSPACE/triton-sdk".Replace('\', '/')
-          $ConfigContent = @"
-set(triton_INCLUDE_DIRS "$SDK_PATH/include")
-set(triton_LIBRARIES "$SDK_PATH/lib/triton.lib")
-set(triton_FOUND TRUE)
-add_library(triton SHARED IMPORTED)
-set_target_properties(triton PROPERTIES
-    INTERFACE_INCLUDE_DIRECTORIES "`$SDK_PATH/include"
-    IMPORTED_IMPLIB "`$SDK_PATH/lib/triton.lib"
-    IMPORTED_LOCATION "`$SDK_PATH/bin/triton.dll"
-)
-add_library(Triton::Triton ALIAS triton)
-"@
+          $ConfigContent = "set(triton_INCLUDE_DIRS `"$SDK_PATH/include`")`n" +
+                           "set(triton_LIBRARIES `"$SDK_PATH/lib/triton.lib`")`n" +
+                           "set(triton_FOUND TRUE)`n" +
+                           "add_library(triton SHARED IMPORTED)`n" +
+                           "set_target_properties(triton PROPERTIES `n" +
+                           "    INTERFACE_INCLUDE_DIRECTORIES `"`${triton_INCLUDE_DIRS}`" `n" +
+                           "    IMPORTED_IMPLIB `"`${triton_LIBRARIES}`" `n" +
+                           "    IMPORTED_LOCATION `"$SDK_PATH/bin/triton.dll`" `n" +
+                           ")`n" +
+                           "add_library(Triton::Triton ALIAS triton)"
+          
           if (!(Test-Path "triton-sdk/cmake")) { mkdir triton-sdk/cmake }
-          $ConfigContent | Out-File triton-sdk/cmake/tritonConfig.cmake -Encoding UTF8
-        shell: pwsh
+          $ConfigContent | Out-File -FilePath "triton-sdk/cmake/tritonConfig.cmake" -Encoding utf8
 
       - name: Configure CMake
+        shell: pwsh
         run: |
           $LLVM_PATH = "$env:CONDA_PREFIX/Library/lib/cmake/llvm"
           $TRITON_CMAKE_DIR = "$env:GITHUB_WORKSPACE/triton-sdk/cmake"
@@ -79,15 +80,15 @@ add_library(Triton::Triton ALIAS triton)
             -DTriton_DIR=$TRITON_CMAKE_DIR `
             -DCMAKE_C_COMPILER="$env:CONDA_PREFIX/Library/bin/clang.exe" `
             -DCMAKE_CXX_COMPILER="$env:CONDA_PREFIX/Library/bin/clang++.exe"
-        shell: pwsh
 
       - name: Build Project
+        shell: pwsh
         run: |
           $env:PATH = "$env:CONDA_PREFIX/Library/bin;$env:GITHUB_WORKSPACE/triton-sdk/bin;$env:PATH"
           cmake --build build --config Release
-        shell: pwsh
 
       - name: Organize and Zip Artifacts
+        shell: pwsh
         run: |
           if (!(Test-Path dist)) { mkdir dist }
           Get-ChildItem -Path build -Include *.exe, *.dll, *.sys -Recurse | Copy-Item -Destination dist\
@@ -95,7 +96,6 @@ add_library(Triton::Triton ALIAS triton)
             Copy-Item "triton-sdk/bin/*.dll" -Destination dist\
           }
           Compress-Archive -Path dist\* -DestinationPath titan-windows-x64.zip -Force
-        shell: pwsh
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
