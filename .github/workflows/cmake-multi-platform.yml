@@ -31,33 +31,29 @@ jobs:
           conda install -y cmake ninja llvmdev=15.0.7 clangdev=15.0.7 fmt zlib zstd range-v3 nlohmann_json
         shell: pwsh
 
-      - name: Physically Patch Clang (C & C++ Distinguish)
+      - name: Physically Patch Clang (Refined Distinction)
         shell: pwsh
         run: |
           $CLANG_BIN = "$env:CONDA_PREFIX/Library/bin"
           
-          # 1. 备份真实的编译器
-          if (Test-Path "$CLANG_BIN/clang++.exe") {
-              Move-Item "$CLANG_BIN/clang++.exe" "$CLANG_BIN/clang++-real.exe" -Force
-          }
-          if (Test-Path "$CLANG_BIN/clang.exe") {
-              Move-Item "$CLANG_BIN/clang.exe" "$CLANG_BIN/clang-real.exe" -Force
-          }
+          # 1. 备份
+          if (!(Test-Path "$CLANG_BIN/clang++-real.exe")) { Move-Item "$CLANG_BIN/clang++.exe" "$CLANG_BIN/clang++-real.exe" -Force }
+          if (!(Test-Path "$CLANG_BIN/clang-real.exe")) { Move-Item "$CLANG_BIN/clang.exe" "$CLANG_BIN/clang-real.exe" -Force }
 
-          # 2. 创建一个通用的 Python 包装器，支持识别 C 或 C++ 模式
+          # 2. 增强版 Python 包装器
           $PyWrapper = @"
           import sys, subprocess, os
           
-          # 1. 识别当前是 C 还是 C++ 模式
-          invoked_as = os.path.basename(sys.argv[0]).lower()
-          is_cpp = '++' in invoked_as
+          args = sys.argv[1:]
+          # 第一个参数是我们自定义的模式标识
+          mode = args[0]
+          incoming_args = args[1:]
           
-          # 2. 过滤掉原始命令行中冲突的标准定义
-          incoming_args = sys.argv[1:]
+          is_cpp = (mode == 'cpp')
+          
+          # 过滤掉所有原始的标准定义
           filtered_args = [arg for arg in incoming_args if not (arg.startswith('-std=') or arg.startswith('/std:'))]
 
-          # 3. 构造核心补丁参数
-          # 无论 C/C++ 都需要的宏
           extra_args = [
               '-mlong-double-80', 
               '-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH',
@@ -68,32 +64,26 @@ jobs:
               '-D_CRT_USE_BUILTIN_OFFSETOF'
           ]
 
-          # 4. 根据模式注入对应的标准
           if is_cpp:
               extra_args.append('-std=c++17')
               extra_args.append('-DFMT_USE_LONG_DOUBLE=0')
               real_compiler = r'$CLANG_BIN/clang++-real.exe'
           else:
-              # C 模式下使用 c11，避免传入 c++17 导致报错
               extra_args.append('-std=c11')
               real_compiler = r'$CLANG_BIN/clang-real.exe'
           
-          # 5. 执行最终命令
           result = subprocess.run([real_compiler] + extra_args + filtered_args)
           sys.exit(result.returncode)
           "@
           $PyWrapper | Set-Content "$CLANG_BIN/clang_wrapper.py"
 
-          # 3. 创建入口 Batch 文件
-          # 这里的关键是把 %0 传进去，让 Python 知道是谁在调用它
-          "@echo off`npython `"$CLANG_BIN/clang_wrapper.py`" %*" | Set-Content "$CLANG_BIN/clang++.bat"
-          "@echo off`npython `"$CLANG_BIN/clang_wrapper.py`" %*" | Set-Content "$CLANG_BIN/clang.bat"
+          # 3. 修改 Batch 入口，显式传入模式标识
+          "@echo off`npython `"$CLANG_BIN/clang_wrapper.py`" cpp %*" | Set-Content "$CLANG_BIN/clang++.bat"
+          "@echo off`npython `"$CLANG_BIN/clang_wrapper.py`" c %*" | Set-Content "$CLANG_BIN/clang.bat"
           
-          # 4. 删除可能干扰的 .exe（或者用假文件占位）
-          "Fake" | Set-Content "$CLANG_BIN/clang++.exe" -ErrorAction SilentlyContinue
-          "Fake" | Set-Content "$CLANG_BIN/clang.exe" -ErrorAction SilentlyContinue
-
-          Write-Host "C and C++ compilers patched and distinguished."
+          # 4. 确保假文件存在以骗过 CMake 的初次检查
+          "Fake" | Set-Content "$CLANG_BIN/clang++.exe" -Force
+          "Fake" | Set-Content "$CLANG_BIN/clang.exe" -Force
 
       - name: Setup Z3 (v4.8.10 - ABI Stable)
         shell: pwsh
