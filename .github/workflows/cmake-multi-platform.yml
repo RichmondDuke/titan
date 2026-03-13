@@ -23,14 +23,12 @@ jobs:
         with:
           auto-update-conda: true
           activate-environment: titan-build-env
-          # 增加 conda-forge 优先级
           channels: conda-forge,defaults
 
       - name: Install Dependencies (Conda)
-        # 核心改动：不再锁死 15.0.7，改用最新的 llvmdev 和 clangdev (目前通常是 19.x)
-        # 这将解决 "Unexpected compiler version" 的报错
+        # 强制锁定 LLVM 15.0.7 以匹配 CMakeLists.txt 的硬性要求
         run: |
-          conda install -y cmake ninja llvmdev clangdev fmt zlib zstd range-v3 nlohmann_json
+          conda install -y cmake ninja llvmdev=15.0.7 clangdev=15.0.7 fmt zlib zstd range-v3 nlohmann_json
         shell: pwsh
 
       - name: Install Triton (vcpkg)
@@ -40,10 +38,14 @@ jobs:
 
       - name: Configure CMake
         run: |
+          # 显式指定 LLVM 路径，防止 CMake 找到系统自带的错误版本
+          $LLVM_PATH = "$env:CONDA_PREFIX/Library/lib/cmake/llvm"
+          
           cmake -B build -S . -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DCMAKE_PREFIX_PATH="$env:CONDA_PREFIX/Library" `
+            -DLLVM_DIR=$LLVM_PATH `
             -DCMAKE_C_COMPILER="$env:CONDA_PREFIX/Library/bin/clang.exe" `
             -DCMAKE_CXX_COMPILER="$env:CONDA_PREFIX/Library/bin/clang++.exe" `
             -DVCPKG_TARGET_TRIPLET=x64-windows
@@ -51,15 +53,17 @@ jobs:
 
       - name: Build Project
         run: |
+          # 将 Conda 的 bin 目录加入临时环境变量，确保编译器能找到 DLL
           $env:PATH = "$env:CONDA_PREFIX/Library/bin;$env:PATH"
           cmake --build build --config Release
         shell: pwsh
 
       - name: Organize and Zip Artifacts
         run: |
-          mkdir dist
+          if (!(Test-Path dist)) { mkdir dist }
+          # 递归搜寻生成的二进制文件并打包
           Get-ChildItem -Path build -Include *.exe, *.dll, *.sys, *.json -Recurse | Copy-Item -Destination dist\
-          Compress-Archive -Path dist\* -DestinationPath titan-windows-x64.zip
+          Compress-Archive -Path dist\* -DestinationPath titan-windows-x64.zip -Force
         shell: pwsh
 
       - name: Create Release and Upload Zip
@@ -68,11 +72,11 @@ jobs:
           tag_name: continuous-build
           name: Continuous Build (Latest)
           body: |
-            Built with latest Clang compatible with MSVC STL.
-            - Toolchain: Clang (Latest from Conda)
-            - Dependencies: LLVM, Triton, Range-v3
+            Built with LLVM 15.0.7 (Conda Environment).
+            - Toolchain: Clang 15
+            - Dependencies: Triton, Range-v3, JSON
           files: titan-windows-x64.zip
-          draft: false
-          prerelease: false
+          # 如果之前有同名 Tag，覆盖它
+          overwrite: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
