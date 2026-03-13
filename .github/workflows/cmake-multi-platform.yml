@@ -26,50 +26,42 @@ jobs:
           channels: conda-forge,defaults
 
       - name: Install Dependencies (Conda)
-        # 强制锁定符合你源码要求的 LLVM 15
         run: |
           conda install -y cmake ninja llvmdev=15.0.7 clangdev=15.0.7 fmt zlib zstd range-v3 nlohmann_json
         shell: pwsh
 
-      - name: Download Prebuilt Triton (LLVM 15 Compatible)
-        # 我们使用一个已知兼容 LLVM 15 的 Triton 预编译版本
-        # 这里使用脚本下载并解压到特定目录
+      - name: Download and Extract Triton (7z)
         run: |
-          $TRITON_VER = "v0.9" 
-          # 使用一个可靠的镜像或直接下载路径（这里以手动模拟官方路径为例）
-          # 如果官方链接失效，这里可以使用我为你托管或指定的备用地址
           $URL = "https://github.com/JonathanSalwan/Triton/releases/download/v0.9/triton-x64-vs2019-py37.release.7z"
+          Write-Host "Downloading Triton from $URL..."
+          Invoke-WebRequest -Uri $URL -OutFile triton.7z
           
-          # 注意：如果上面的 URL 404，可以使用以下通用逻辑尝试获取
-          try {
-            Invoke-WebRequest -Uri $URL -OutFile triton.7z -ErrorAction Stop
-          } catch {
-            Write-Host "Primary URL failed, attempting alternate..."
-            # 备用方案：通过一个更通用的路径或你自己的资源服务器
-            $URL = "https://github.com/RichmondDuke/titan/releases/download/deps/Triton-v1.0.0-win64-llvm15.zip"
-            Invoke-WebRequest -Uri $URL -OutFile triton.zip
-          }
+          # 使用系统自带的 7z 程序解压
+          & "7z.exe" x triton.7z -o"triton-deps" -y
           
-          Expand-Archive -Path triton.7z -DestinationPath "$env:GITHUB_WORKSPACE/triton-deps"
+          # 验证解压后的内容（方便排查目录结构）
+          ls triton-deps
         shell: pwsh
 
       - name: Configure CMake
         run: |
           $LLVM_PATH = "$env:CONDA_PREFIX/Library/lib/cmake/llvm"
-          $TRITON_DIR = "$env:GITHUB_WORKSPACE/triton-deps"
+          # 关键点：Triton 0.9 二进制包可能没有提供 CMake 配置文件
+          # 我们直接把头文件和库文件的路径传给 CMake
+          $TRITON_ROOT = "$env:GITHUB_WORKSPACE/triton-deps"
           
           cmake -B build -S . -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_PREFIX_PATH="$env:CONDA_PREFIX/Library;$TRITON_DIR" `
+            -DCMAKE_PREFIX_PATH="$env:CONDA_PREFIX/Library;$TRITON_ROOT" `
             -DLLVM_DIR=$LLVM_PATH `
-            -DTriton_DIR="$TRITON_DIR/lib/cmake/triton" `
             -DCMAKE_C_COMPILER="$env:CONDA_PREFIX/Library/bin/clang.exe" `
-            -DCMAKE_CXX_COMPILER="$env:CONDA_PREFIX/Library/bin/clang++.exe"
+            -DCMAKE_CXX_COMPILER="$env:CONDA_PREFIX/Library/bin/clang++.exe" `
+            -DTRITON_INCLUDE_DIRS="$TRITON_ROOT/include" `
+            -DTRITON_LIBRARIES="$TRITON_ROOT/libs/triton.lib"
         shell: pwsh
 
       - name: Build Project
         run: |
-          # 确保运行时能找到 LLVM 和 Triton 的 DLL
           $env:PATH = "$env:CONDA_PREFIX/Library/bin;$env:GITHUB_WORKSPACE/triton-deps/bin;$env:PATH"
           cmake --build build --config Release
         shell: pwsh
@@ -78,8 +70,10 @@ jobs:
         run: |
           if (!(Test-Path dist)) { mkdir dist }
           Get-ChildItem -Path build -Include *.exe, *.dll, *.sys -Recurse | Copy-Item -Destination dist\
-          # 拷贝 Triton 的 DLL 供程序运行
-          Get-ChildItem -Path "$env:GITHUB_WORKSPACE/triton-deps/bin" -Include *.dll | Copy-Item -Destination dist\
+          # 尝试拷贝解压出来的 bin 目录下的 dll
+          if (Test-Path "triton-deps/bin") {
+            Get-ChildItem -Path "triton-deps/bin" -Include *.dll | Copy-Item -Destination dist\
+          }
           Compress-Archive -Path dist\* -DestinationPath titan-windows-x64.zip -Force
         shell: pwsh
 
