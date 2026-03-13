@@ -27,7 +27,7 @@ jobs:
 
       - name: Install Dependencies (Conda)
         run: |
-          conda install -y cmake ninja llvmdev=15.0.7 clangdev=15.0.7 fmt zlib zstd range-v3 nlohmann_json
+          conda install -c conda-forge -y cmake ninja llvmdev=15.0.7 clangdev=15.0.7 fmt zlib zstd range-v3 nlohmann_json z3
         shell: pwsh
 
       - name: Setup Triton SDK (v0.9 Binary + Headers Patch)
