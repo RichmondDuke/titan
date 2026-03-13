@@ -70,14 +70,16 @@ jobs:
         shell: pwsh
         run: |
           $LLVM_PATH = "$env:CONDA_PREFIX/Library/lib/cmake/llvm"
-          $TRITON_CMAKE_DIR = "$env:GITHUB_WORKSPACE/triton-sdk/cmake"
+          # 确保路径使用正斜杠，CMake 在 Windows 上处理反斜杠有时会出问题
+          $TRITON_CMAKE_DIR = "$env:GITHUB_WORKSPACE/triton-sdk/cmake".Replace('\', '/')
           
           cmake -B build -S . -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_PREFIX_PATH="$env:CONDA_PREFIX/Library" `
-            -DLLVM_DIR=$LLVM_PATH `
-            -Dtriton_DIR=$TRITON_CMAKE_DIR `
-            -DTriton_DIR=$TRITON_CMAKE_DIR `
+            -DCMAKE_PREFIX_PATH="$env:CONDA_PREFIX/Library;$TRITON_CMAKE_DIR" `
+            -DLLVM_DIR="$LLVM_PATH" `
+            -Dtriton_DIR="$TRITON_CMAKE_DIR" `
+            -DTriton_DIR="$TRITON_CMAKE_DIR" `
+            -Dtriton_FOUND=ON `
             -DCMAKE_C_COMPILER="$env:CONDA_PREFIX/Library/bin/clang.exe" `
             -DCMAKE_CXX_COMPILER="$env:CONDA_PREFIX/Library/bin/clang++.exe"
 
