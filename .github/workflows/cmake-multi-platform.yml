@@ -93,6 +93,34 @@ jobs:
           $CONDA_CMAKE_DEST = "$env:CONDA_PREFIX/Library/lib/cmake/triton"
           if (!(Test-Path $CONDA_CMAKE_DEST)) { New-Item -ItemType Directory -Path $CONDA_CMAKE_DEST -Force }
           Copy-Item "triton-sdk/cmake/tritonConfig.cmake" "$CONDA_CMAKE_DEST/tritonConfig.cmake" -Force
+          
+      - name: Create Clang Wrapper
+        shell: pwsh
+        run: |
+          # 创建一个临时的包装文件夹
+          $WrapperDir = New-Item -ItemType Directory -Path "$env:GITHUB_WORKSPACE/bin-wrapper" -Force
+          $RealClangPlus = "$env:CONDA_PREFIX/Library/bin/clang++.exe"
+          $RealClang = "$env:CONDA_PREFIX/Library/bin/clang.exe"
+
+          # 创建 clang++.bat 包装脚本
+          # -mlong-double-80: 强制开启 80 位长浮点数支持
+          # -fms-compatibility: 解决 __cpuid 等宏定义冲突
+          $WrapperContent = @"
+          @echo off
+          "$RealClangPlus" -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -mlong-double-80 -fms-compatibility %*
+          "@
+          $WrapperContent | Set-Content -Path "$WrapperDir/clang++.bat" -Encoding Ascii
+          
+          # 同样包装一份 clang.bat
+          $WrapperContentC = @"
+          @echo off
+          "$RealClang" -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -fms-compatibility %*
+          "@
+          $WrapperContentC | Set-Content -Path "$WrapperDir/clang.bat" -Encoding Ascii
+
+          # 将包装路径推到 PATH 的最前面，确保硬编码的 'clang++' 优先调用它
+          echo "$WrapperDir" >> $env:GITHUB_PATH
+
 
       - name: Configure CMake
         shell: pwsh
