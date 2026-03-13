@@ -23,32 +23,42 @@ jobs:
       - name: Setup MSVC Dev Cmd
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Install LLVM 15 (clang + LLVMConfig.cmake)
-        uses: KyleMayes/install-llvm-action@v2
-        with:
-          version: "15.0.7"
-          directory: ${{ runner.temp }}\llvm
-
-      - name: Locate LLVMConfig.cmake
+      # LLVM: use Chocolatey to guarantee a full install with LLVMConfig.cmake
+      - name: Install LLVM 15 via Chocolatey
         shell: pwsh
         run: |
-          $llvmRoot = "${{ runner.temp }}\llvm"
-          Write-Host "LLVM root: $llvmRoot"
+          choco install -y llvm --version 15.0.7
+          refreshenv
 
-          $cfg = Get-ChildItem -Path $llvmRoot -Recurse -Filter "LLVMConfig.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $cfg) {
-              Write-Host "Directory listing (depth 4):"
-              Get-ChildItem -Path $llvmRoot -Recurse -Depth 4 | Select-Object FullName
-              throw "LLVMConfig.cmake not found under $llvmRoot"
+      - name: Locate LLVMConfig.cmake (from Chocolatey LLVM)
+        shell: pwsh
+        run: |
+          $roots = @(
+            "C:\Program Files\LLVM",
+            "C:\Program Files\LLVM\lib\cmake\llvm",
+            "C:\ProgramData\chocolatey\lib\llvm"
+          )
+
+          $cfg = $null
+          foreach ($r in $roots) {
+            if (Test-Path $r) {
+              $found = Get-ChildItem -Path $r -Recurse -Filter "LLVMConfig.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($found) { $cfg = $found; break }
+            }
           }
+
+          if (-not $cfg) {
+            Write-Host "Could not find LLVMConfig.cmake in common roots. Searching under C:\Program Files..."
+            $cfg = Get-ChildItem -Path "C:\Program Files" -Recurse -Filter "LLVMConfig.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+
+          if (-not $cfg) { throw "LLVMConfig.cmake not found after LLVM install" }
 
           $llvmDir = $cfg.Directory.FullName
           Write-Host "Found LLVMConfig.cmake at: $($cfg.FullName)"
-          Write-Host "Using LLVM_DIR: $llvmDir"
+          Write-Host "Using LLVM_DIR=$llvmDir"
 
-          # Export for later steps
           "LLVM_DIR=$llvmDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "LLVM_BIN=$($cfg.Directory.Parent.Parent.FullName)\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install tools (7zip)
         shell: pwsh
@@ -65,7 +75,7 @@ jobs:
           & 7z x $archive "-o${{ env.TRITON_DIR }}" -y
 
           Write-Host "Triton extracted to ${{ env.TRITON_DIR }}"
-          Get-ChildItem -Recurse -Depth 2 "${{ env.TRITON_DIR }}" | Select-Object FullName
+          Get-ChildItem -Recurse -Depth 3 "${{ env.TRITON_DIR }}" | Select-Object FullName
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -83,15 +93,14 @@ jobs:
         run: |
           conan profile detect --force
 
-          
       - name: Conan install deps (fmt/range-v3/z3/capstone)
         shell: pwsh
         run: |
           conan install . `
-          -of "$env:BUILD_DIR\conan" `
-          -s build_type=Release `
-          -s compiler.cppstd=20 `
-          -b missing
+            -of "$env:BUILD_DIR\conan" `
+            -s build_type=Release `
+            -s compiler.cppstd=20 `
+            -b missing
 
       - name: Debug -> list Conan output folder
         shell: pwsh
@@ -120,14 +129,13 @@ jobs:
       - name: Generate vmprotect64.ll (intrinsics)
         shell: pwsh
         run: |
-          $llvmRoot = "${{ runner.temp }}\llvm"
-          $clang = Get-ChildItem -Path $llvmRoot -Recurse -Filter "clang.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $clang) { throw "clang.exe not found under $llvmRoot" }
+          $clang = Get-Command clang.exe -ErrorAction SilentlyContinue
+          if (-not $clang) { throw "clang.exe not found in PATH" }
 
-          Write-Host "Using clang: $($clang.FullName)"
+          Write-Host "Using clang: $($clang.Source)"
 
           Push-Location intrinsics
-          & $clang.FullName `
+          & $clang.Source `
             -std=c++17 `
             -O3 `
             -Iremill/include `
@@ -143,7 +151,6 @@ jobs:
             -o vmprotect64.ll
           Pop-Location
 
-      # 运行时若缺 Triton.dll：把 Triton 的 bin 目录加入 PATH（如果有）
       - name: Add Triton bin to PATH (best-effort)
         shell: pwsh
         run: |
