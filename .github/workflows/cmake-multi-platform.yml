@@ -1,4 +1,4 @@
-name: Build and Release Titan
+name: Build and Release Titan (Deep Patch)
 
 on:
   push:
@@ -25,139 +25,94 @@ jobs:
           activate-environment: titan-build-env
           channels: conda-forge,defaults
 
-      - name: Install Dependencies (Conda)
+      - name: Install Compilers & Toolchain
         run: |
-          # 移除了无效的 z3，保留核心编译链
+          # 核心：必须锁定 llvm/clang 15 以匹配 Triton v0.9 的 ABI
           conda install -y cmake ninja llvmdev=15.0.7 clangdev=15.0.7 fmt zlib zstd range-v3 nlohmann_json
         shell: pwsh
 
-      - name: Setup Z3 (v4.8.10)
+      - name: Physically Patch Clang (The "Nuke" Strategy)
         shell: pwsh
         run: |
-          # Triton v0.9 严格依赖 4.8.10，直接拉取微软官方构建，保证 ABI 100% 兼容
+          # 找到 Conda 环境中真实的编译器位置
+          $CLANG_DIR = "$env:CONDA_PREFIX/Library/bin"
+          $REAL_CLANG_CPP = "$CLANG_DIR/clang++.exe"
+          $REAL_CLANG_C = "$CLANG_DIR/clang.exe"
+          
+          # 将原程序重命名为 -real.exe
+          Move-Item $REAL_CLANG_CPP "$CLANG_DIR/clang++-real.exe" -Force
+          Move-Item $REAL_CLANG_C "$CLANG_DIR/clang-real.exe" -Force
+
+          # 创建物理代理 Batch 文件，强制注入所有“免死金牌”参数
+          # -mlong-double-80: 解决 Remill float80 长度断言错误
+          # -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH: 解决 MSVC 14.44 的版本霸凌
+          # -fms-compatibility: 解决 __cpuid 宏定义冲突
+          $WrapperCPP = @"
+          @echo off
+          "$CLANG_DIR/clang++-real.exe" -mlong-double-80 -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -fms-compatibility -fms-extensions %*
+          "@
+          $WrapperC = @"
+          @echo off
+          "$CLANG_DIR/clang-real.exe" -mlong-double-80 -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -fms-compatibility -fms-extensions %*
+          "@
+
+          $WrapperCPP | Set-Content -Path "$CLANG_DIR/clang++.bat" -Encoding Ascii
+          $WrapperC | Set-Content -Path "$CLANG_DIR/clang.bat" -Encoding Ascii
+          
+          # 在 Windows 下，cmd.exe 调用 'clang++' 会优先匹配 .bat（如果当前目录下没有 .exe）
+          # 为保险起见，我们做一个带 .exe 后缀的硬链接/拷贝（如果系统支持脚本作为入口）
+          # 但最稳妥的是直接让 PATH 优先寻找我们的 bat
+          Write-Host "Clang physically patched in $CLANG_DIR"
+
+      - name: Setup Z3 (v4.8.10 - ABI Stable)
+        shell: pwsh
+        run: |
           $URL = "https://github.com/Z3Prover/z3/releases/download/z3-4.8.10/z3-4.8.10-x64-win.zip"
           Invoke-WebRequest -Uri $URL -OutFile z3.zip
           Expand-Archive -Path z3.zip -DestinationPath . -Force
           Rename-Item -Path "z3-4.8.10-x64-win" -NewName "z3-sdk"
-          Write-Host "Z3 downloaded and extracted to z3-sdk"
 
-      - name: Setup Triton SDK (v0.9 Binary + Headers Patch)
+      - name: Setup Triton SDK (v0.9 Patch)
         shell: pwsh
         run: |
           $URL = "https://github.com/JonathanSalwan/Triton/releases/download/v0.9/triton-x64-vs2019-py37.release.7z"
           Invoke-WebRequest -Uri $URL -OutFile triton.7z
           & "7z.exe" x triton.7z -o"triton-sdk" -y
-
           git clone --depth 1 https://github.com/JonathanSalwan/Triton.git triton-src
-          if (!(Test-Path "triton-sdk/include/triton")) { New-Item -ItemType Directory -Path "triton-sdk/include/triton" -Force }
           xcopy /E /I /Y triton-src\src\libtriton\includes\triton\* triton-sdk\include\triton\
-
-          $ConfigLines = @(
-            "#ifndef TRITON_CONFIG_HPP",
-            "#define TRITON_CONFIG_HPP",
-            "",
-            "/* Triton 编译选项开关 */",
-            "#define TRITON_Z3_INTERFACE",
-            "/* #undef TRITON_BITWUZLA_INTERFACE */",
-            "/* #undef TRITON_PYTHON_BINDINGS */",
-            "",
-            "#endif /* TRITON_CONFIG_HPP */"
-          )
-          $ConfigLines | Set-Content -Path "triton-sdk/include/triton/config.hpp" -Encoding UTF8
-
-          if (!(Test-Path "triton-sdk/lib")) { New-Item -ItemType Directory -Path "triton-sdk/lib" -Force }
-          if (Test-Path "triton-sdk/triton.lib") { Move-Item "triton-sdk/triton.lib" "triton-sdk/lib/" -Force }
-          if (!(Test-Path "triton-sdk/bin")) { New-Item -ItemType Directory -Path "triton-sdk/bin" -Force }
-          if (Test-Path "triton-sdk/triton.dll") { Move-Item "triton-sdk/*.dll" "triton-sdk/bin/" -Force }
-
-          $ABS_SDK_PATH = "$env:GITHUB_WORKSPACE/triton-sdk".Replace('\', '/')
-          $CmakeLines = @(
-            "set(triton_INCLUDE_DIRS `"$ABS_SDK_PATH/include`")",
-            "set(triton_LIBRARIES `"$ABS_SDK_PATH/lib/triton.lib`")",
-            "set(triton_FOUND TRUE)",
-            "if(NOT TARGET triton_imp)",
-            "    add_library(triton_imp SHARED IMPORTED)",
-            "    set_target_properties(triton_imp PROPERTIES",
-            "        INTERFACE_INCLUDE_DIRECTORIES `"$ABS_SDK_PATH/include`"",
-            "        IMPORTED_IMPLIB `"$ABS_SDK_PATH/lib/triton.lib`"",
-            "        IMPORTED_LOCATION `"$ABS_SDK_PATH/bin/triton.dll`"",
-            "    )",
-            "endif()",
-            "if(NOT TARGET triton::triton)",
-            "    add_library(triton::triton ALIAS triton_imp)",
-            "endif()"
-          )
-          if (!(Test-Path "triton-sdk/cmake")) { New-Item -ItemType Directory -Path "triton-sdk/cmake" -Force }
-          $CmakeLines | Set-Content -Path "triton-sdk/cmake/tritonConfig.cmake" -Encoding UTF8
-
-          $CONDA_CMAKE_DEST = "$env:CONDA_PREFIX/Library/lib/cmake/triton"
-          if (!(Test-Path $CONDA_CMAKE_DEST)) { New-Item -ItemType Directory -Path $CONDA_CMAKE_DEST -Force }
-          Copy-Item "triton-sdk/cmake/tritonConfig.cmake" "$CONDA_CMAKE_DEST/tritonConfig.cmake" -Force
-
-
-      - name: Clang Hijack (Fix MSVC 14.44 & Float80)
-        shell: pwsh
-        run: |
-          # 1. 创建一个拦截器目录
-          $HijackDir = New-Item -ItemType Directory -Path "$env:GITHUB_WORKSPACE/hijack" -Force
-          $RealClang = "$env:CONDA_PREFIX/Library/bin/clang++.exe"
-
-          # 2. 编写包装脚本
-          # -mlong-double-80: 解决 Remill 的 float80 断言
-          # -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH: 解决 MSVC 14.44 的版本检查
-          # -fms-compatibility: 解决 __cpuid 宏冲突
-          $BatchContent = @"
-          @echo off
-          "$RealClang" -mlong-double-80 -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -fms-compatibility %*
-          "@
           
-          $BatchContent | Set-Content -Path "$HijackDir/clang++.bat" -Encoding Ascii
-          Copy-Item "$HijackDir/clang++.bat" "$HijackDir/clang.bat"
-
-          # 3. 将拦截器路径加入 GitHub Actions 全局 PATH 的最顶端
-          echo "$HijackDir" >> $env:GITHUB_PATH
-          Write-Host "Compiler hijacked successfully."
+          # 强制写入兼容性 config.hpp
+          $Config = "#ifndef TRITON_CONFIG_HPP`n#define TRITON_CONFIG_HPP`n#define TRITON_Z3_INTERFACE`n#endif"
+          $Config | Set-Content -Path "triton-sdk/include/triton/config.hpp" -Encoding UTF8
+          
+          if (!(Test-Path "triton-sdk/lib")) { mkdir triton-sdk/lib }
+          Move-Item "triton-sdk/triton.lib" "triton-sdk/lib/" -ErrorAction SilentlyContinue
 
       - name: Configure CMake
         shell: pwsh
         run: |
-          $LLVM_PATH = "$env:CONDA_PREFIX/Library/lib/cmake/llvm"
           $Z3_INC = "$env:GITHUB_WORKSPACE\z3-sdk\include"
           $Z3_LIB = "$env:GITHUB_WORKSPACE/z3-sdk/bin/libz3.lib".Replace('\', '/')
-          
-          # 1. 寻找 14.2x (VS2019) 版本的 MSVC 路径（最兼容 Clang 15）
-          $MSVC_BASE = "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Tools/MSVC"
-          $OLD_MSVC = Get-ChildItem -Path $MSVC_BASE | Where-Object { $_.Name -like "14.2*" } | Select-Object -First 1 -ExpandProperty FullName
-          
-          # 2. 核心旗标：增加 -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
-          # 还要增加 -fms-compatibility 以处理 __cpuid 的宏冲突
-          $FLAGS = "-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -D_HAS_DEPRECATED_RESULT_OF -D_CRT_SECURE_NO_WARNINGS -fms-compatibility"
-          $CXX_FLAGS = "$FLAGS -I`"$Z3_INC`""
-          
-          if ($null -ne $OLD_MSVC) {
-             $OLD_MSVC_INC = "$OLD_MSVC\include"
-             $CXX_FLAGS += " -isystem `"$OLD_MSVC_INC`""
-          }
+          $ABS_SDK = "$env:GITHUB_WORKSPACE/triton-sdk".Replace('\', '/')
 
           $cmakeArgs = @(
             "-B", "build",
-            "-S", ".",
             "-G", "Ninja",
             "-DCMAKE_BUILD_TYPE=Release",
             "-DCMAKE_PREFIX_PATH=$env:CONDA_PREFIX/Library",
-            "-DLLVM_DIR=$LLVM_PATH",
-            "-DCMAKE_C_COMPILER=$env:CONDA_PREFIX/Library/bin/clang.exe",
-            "-DCMAKE_CXX_COMPILER=$env:CONDA_PREFIX/Library/bin/clang++.exe",
-            "-DCMAKE_CXX_FLAGS=$CXX_FLAGS",
-            "-DCMAKE_EXE_LINKER_FLAGS=$Z3_LIB"
+            "-DCMAKE_C_COMPILER=$env:CONDA_PREFIX/Library/bin/clang.bat",
+            "-DCMAKE_CXX_COMPILER=$env:CONDA_PREFIX/Library/bin/clang++.bat",
+            "-Dtriton_INCLUDE_DIRS=$ABS_SDK/include",
+            "-Dtriton_LIBRARIES=$ABS_SDK/lib/triton.lib",
+            "-DCMAKE_EXE_LINKER_FLAGS=$Z3_LIB",
+            "-DCMAKE_CXX_FLAGS=-I`"$Z3_INC`""
           )
-
           & cmake @cmakeArgs
 
       - name: Build Project
         shell: pwsh
         run: |
-          # 把 Z3 的运行库也加进 PATH，防止编译期测试脚本找不到 DLL 报错
+          # 注入运行时 PATH，确保编译生成的测试程序能跑起来
           $env:PATH = "$env:CONDA_PREFIX/Library/bin;$env:GITHUB_WORKSPACE/triton-sdk/bin;$env:GITHUB_WORKSPACE/z3-sdk/bin;$env:PATH"
           cmake --build build --config Release
 
@@ -165,14 +120,9 @@ jobs:
         shell: pwsh
         run: |
           if (!(Test-Path dist)) { mkdir dist }
-          Get-ChildItem -Path build -Include *.exe, *.dll, *.sys -Recurse | Copy-Item -Destination dist\
-          if (Test-Path "triton-sdk/bin") {
-            Copy-Item "triton-sdk/bin/*.dll" -Destination dist\
-          }
-          if (Test-Path "z3-sdk/bin") {
-            # 把 libz3.dll 也一起打包给最终用户
-            Copy-Item "z3-sdk/bin/*.dll" -Destination dist\
-          }
+          Get-ChildItem -Path build -Include *.exe, *.dll -Recurse | Copy-Item -Destination dist\
+          Copy-Item "triton-sdk/*.dll" -Destination dist\ -ErrorAction SilentlyContinue
+          Copy-Item "z3-sdk/bin/*.dll" -Destination dist\ -ErrorAction SilentlyContinue
           Compress-Archive -Path dist\* -DestinationPath titan-windows-x64.zip -Force
 
       - name: Create Release
