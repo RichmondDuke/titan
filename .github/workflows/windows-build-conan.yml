@@ -62,7 +62,7 @@ jobs:
         run: |
           conan profile detect --force
 
-      # 仅展示需要替换的 step（其余不变）
+          
       - name: Conan install deps (fmt/range-v3/z3/capstone)
         shell: pwsh
         run: |
@@ -72,15 +72,23 @@ jobs:
           -s compiler.cppstd=20 `
           -b missing
 
+      - name: Debug -> list Conan output folder
+        shell: pwsh
+        run: |
+          Write-Host "Listing $env:BUILD_DIR\conan"
+          Get-ChildItem -Force -Recurse "$env:BUILD_DIR\conan" | Select-Object FullName
+
       - name: Configure (CMake)
         shell: pwsh
         run: |
           $llvmDir = "${{ runner.temp }}\llvm"
           $llvmCmake = Join-Path $llvmDir "lib\cmake\llvm"
 
+          $toolchain = Resolve-Path "$env:BUILD_DIR\conan\conan_toolchain.cmake"
+
           cmake -S . -B $env:BUILD_DIR `
             -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_TOOLCHAIN_FILE="$env:BUILD_DIR\conan\conan_toolchain.cmake" `
+            -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
             -DCMAKE_PREFIX_PATH="$env:BUILD_DIR\conan" `
             -DLLVM_DIR="$llvmCmake" `
             -DTRITON_ROOT="${{ env.TRITON_DIR }}"
