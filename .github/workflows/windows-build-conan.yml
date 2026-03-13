@@ -77,8 +77,6 @@ jobs:
           Write-Host "Listing $env:BUILD_DIR\conan"
           Get-ChildItem -Force -Recurse "$env:BUILD_DIR\conan" | Select-Object FullName
 
-      # Triton prebuilt does not ship a tritonConfig.cmake; provide a Find module via CMAKE_MODULE_PATH.
-      # This assumes you have (or will add) a file at: cmake/Findtriton.cmake in the repo.
       - name: Configure (CMake)
         shell: pwsh
         run: |
@@ -88,15 +86,20 @@ jobs:
           $conanGen = Resolve-Path "$env:BUILD_DIR\conan\build\generators"
           $toolchain = Join-Path $conanGen "conan_toolchain.cmake"
 
+          # IMPORTANT: Use forward slashes for CMake list variables to avoid backslash escapes like \a, \t, etc.
+          $ws = "${{ github.workspace }}".Replace('\', '/')
+          $cmakeModules = "$ws/cmake"
+          $tritonRoot = "${{ env.TRITON_DIR }}".Replace('\', '/')
+
           cmake -S . -B $env:BUILD_DIR `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
-            -DCMAKE_PREFIX_PATH="$conanGen" `
-            -DCMAKE_MODULE_PATH="${{ github.workspace }}\cmake" `
-            -DTRITON_ROOT="${{ env.TRITON_DIR }}" `
-            -Dtriton_ROOT="${{ env.TRITON_DIR }}" `
-            -Dtriton_DIR="${{ env.TRITON_DIR }}" `
-            -DLLVM_DIR="$llvmCmake"
+            -DCMAKE_PREFIX_PATH="$($conanGen.Path.Replace('\','/'))" `
+            -DCMAKE_MODULE_PATH="$cmakeModules" `
+            -DTRITON_ROOT="$tritonRoot" `
+            -Dtriton_ROOT="$tritonRoot" `
+            -Dtriton_DIR="$tritonRoot" `
+            -DLLVM_DIR="$($llvmCmake.Replace('\','/'))"
 
       - name: Build titan.exe
         shell: pwsh
@@ -127,7 +130,6 @@ jobs:
             -o vmprotect64.ll
           Pop-Location
 
-      # Runtime: if Triton.dll is needed at runtime, add Triton bin folders to PATH (best-effort)
       - name: Add Triton bin to PATH (best-effort)
         shell: pwsh
         run: |
