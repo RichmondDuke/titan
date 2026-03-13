@@ -98,15 +98,17 @@ jobs:
         shell: pwsh
         run: |
           $LLVM_PATH = "$env:CONDA_PREFIX/Library/lib/cmake/llvm"
-          # 定位到刚刚下载的原厂 Z3
           $Z3_INC = "$env:GITHUB_WORKSPACE\z3-sdk\include"
           $Z3_LIB = "$env:GITHUB_WORKSPACE/z3-sdk/bin/libz3.lib".Replace('\', '/')
           
+          # 1. 寻找 14.2x (VS2019) 版本的 MSVC 路径（最兼容 Clang 15）
           $MSVC_BASE = "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Tools/MSVC"
           $OLD_MSVC = Get-ChildItem -Path $MSVC_BASE | Where-Object { $_.Name -like "14.2*" } | Select-Object -First 1 -ExpandProperty FullName
           
-          $CXX_FLAGS = "-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -D_HAS_DEPRECATED_RESULT_OF -D_CRT_SECURE_NO_WARNINGS"
-          $CXX_FLAGS += " -I`"$Z3_INC`""
+          # 2. 核心旗标：增加 -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
+          # 还要增加 -fms-compatibility 以处理 __cpuid 的宏冲突
+          $FLAGS = "-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -D_HAS_DEPRECATED_RESULT_OF -D_CRT_SECURE_NO_WARNINGS -fms-compatibility"
+          $CXX_FLAGS = "$FLAGS -I`"$Z3_INC`""
           
           if ($null -ne $OLD_MSVC) {
              $OLD_MSVC_INC = "$OLD_MSVC\include"
@@ -123,9 +125,8 @@ jobs:
             "-DCMAKE_C_COMPILER=$env:CONDA_PREFIX/Library/bin/clang.exe",
             "-DCMAKE_CXX_COMPILER=$env:CONDA_PREFIX/Library/bin/clang++.exe",
             "-DCMAKE_CXX_FLAGS=$CXX_FLAGS",
-            "-DCMAKE_EXE_LINKER_FLAGS=$Z3_LIB" 
+            "-DCMAKE_EXE_LINKER_FLAGS=$Z3_LIB"
           )
-          # 预埋 Z3_LIB，防止链接阶段找不到库
 
           & cmake @cmakeArgs
 
