@@ -45,28 +45,33 @@ jobs:
           import sys, subprocess, os
           
           args = sys.argv[1:]
-          # 第一个参数是我们自定义的模式标识
           mode = args[0]
           incoming_args = args[1:]
           
           is_cpp = (mode == 'cpp')
           
-          # 过滤掉所有原始的标准定义
+          # 1. 过滤掉所有原始的标准定义
           filtered_args = [arg for arg in incoming_args if not (arg.startswith('-std=') or arg.startswith('/std:'))]
 
+          # 2. 构造“外科手术”级别的补丁参数
           extra_args = [
               '-mlong-double-80', 
-              '-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH',
               '-fms-compatibility',
               '-fms-extensions',
+              '-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH',
+              # --- 核心修复：强制关闭 MSVC 对 bit_cast 的探测和使用 ---
               '-D_HAS_CONSTEXPR_BIT_CAST=0',
               '-D_INTERNAL_BIT_CAST_SUPPORTED=0',
-              '-D_CRT_USE_BUILTIN_OFFSETOF'
+              '-D_HAS_BIT_CAST_SUPPORT=0',
+              # --- 针对 cmath 里的 float80 冲突 ---
+              '-D_CRT_USE_BUILTIN_OFFSETOF',
+              '-D__STDCPP_WANT_MATH_SPEC_FUNCS__=0',
+              '-DFMT_USE_LONG_DOUBLE=0'
           ]
 
           if is_cpp:
-              extra_args.append('-std=c++17')
-              extra_args.append('-DFMT_USE_LONG_DOUBLE=0')
+              # 回到 C++20，确保源码能编译
+              extra_args.append('-std=c++20')
               real_compiler = r'$CLANG_BIN/clang++-real.exe'
           else:
               extra_args.append('-std=c11')
@@ -156,22 +161,15 @@ jobs:
           $Z3_INC = "$env:GITHUB_WORKSPACE/z3-sdk/include"
           $TRITON_DIR = "$env:GITHUB_WORKSPACE/triton-sdk".Replace('\', '/')
 
-          # 合并所有必要的编译参数
-          $CXX_FLAGS = "-I`"$Z3_INC`" -mlong-double-80 -DFMT_USE_LONG_DOUBLE=0"
-
           $cmakeArgs = @(
             "-B", "build",
             "-G", "Ninja",
             "-DCMAKE_BUILD_TYPE=Release",
-            # --- 强制指定 C++ 标准，禁止 CMake 自动推导 ---
-            "-DCMAKE_CXX_STANDARD=17",
-            "-DCMAKE_CXX_STANDARD_REQUIRED=ON",
-            "-DCMAKE_CXX_EXTENSIONS=OFF",
-            # ------------------------------------------
             "-DCMAKE_PREFIX_PATH=$env:CONDA_PREFIX/Library",
             "-DCMAKE_C_COMPILER=$env:CONDA_PREFIX/Library/bin/clang.bat",
             "-DCMAKE_CXX_COMPILER=$env:CONDA_PREFIX/Library/bin/clang++.bat",
-            "-DCMAKE_CXX_FLAGS=$CXX_FLAGS",
+            # 只传递必要的包含路径，标准和 Flag 由包装器接管
+            "-DCMAKE_CXX_FLAGS=-I`"$Z3_INC`"",
             "-Dtriton_DIR=$TRITON_DIR", 
             "-DCMAKE_EXE_LINKER_FLAGS=$Z3_LIB"
           )
