@@ -27,24 +27,31 @@ jobs:
 
       - name: Install Dependencies (Conda)
         run: |
-          conda install -c conda-forge -y cmake ninja llvmdev=15.0.7 clangdev=15.0.7 fmt zlib zstd range-v3 nlohmann_json z3
+          # 移除了无效的 z3，保留核心编译链
+          conda install -y cmake ninja llvmdev=15.0.7 clangdev=15.0.7 fmt zlib zstd range-v3 nlohmann_json
         shell: pwsh
+
+      - name: Setup Z3 (v4.8.10)
+        shell: pwsh
+        run: |
+          # Triton v0.9 严格依赖 4.8.10，直接拉取微软官方构建，保证 ABI 100% 兼容
+          $URL = "https://github.com/Z3Prover/z3/releases/download/z3-4.8.10/z3-4.8.10-x64-win.zip"
+          Invoke-WebRequest -Uri $URL -OutFile z3.zip
+          Expand-Archive -Path z3.zip -DestinationPath . -Force
+          Rename-Item -Path "z3-4.8.10-x64-win" -NewName "z3-sdk"
+          Write-Host "Z3 downloaded and extracted to z3-sdk"
 
       - name: Setup Triton SDK (v0.9 Binary + Headers Patch)
         shell: pwsh
         run: |
-          # 1. 下载并解压 Triton v0.9 二进制
           $URL = "https://github.com/JonathanSalwan/Triton/releases/download/v0.9/triton-x64-vs2019-py37.release.7z"
           Invoke-WebRequest -Uri $URL -OutFile triton.7z
           & "7z.exe" x triton.7z -o"triton-sdk" -y
 
-          # 2. 补全头文件
           git clone --depth 1 https://github.com/JonathanSalwan/Triton.git triton-src
           if (!(Test-Path "triton-sdk/include/triton")) { New-Item -ItemType Directory -Path "triton-sdk/include/triton" -Force }
-          # 修正拷贝逻辑：确保 triton 文件夹下的内容直接进入 include/triton
           xcopy /E /I /Y triton-src\src\libtriton\includes\triton\* triton-sdk\include\triton\
 
-          # 3. 手动伪造 config.hpp (改用数组方式写入，避开 @ 符号)
           $ConfigLines = @(
             "#ifndef TRITON_CONFIG_HPP",
             "#define TRITON_CONFIG_HPP",
@@ -58,13 +65,11 @@ jobs:
           )
           $ConfigLines | Set-Content -Path "triton-sdk/include/triton/config.hpp" -Encoding UTF8
 
-          # 4. 整理 SDK 目录结构
           if (!(Test-Path "triton-sdk/lib")) { New-Item -ItemType Directory -Path "triton-sdk/lib" -Force }
           if (Test-Path "triton-sdk/triton.lib") { Move-Item "triton-sdk/triton.lib" "triton-sdk/lib/" -Force }
           if (!(Test-Path "triton-sdk/bin")) { New-Item -ItemType Directory -Path "triton-sdk/bin" -Force }
           if (Test-Path "triton-sdk/triton.dll") { Move-Item "triton-sdk/*.dll" "triton-sdk/bin/" -Force }
 
-          # 5. 动态生成 tritonConfig.cmake
           $ABS_SDK_PATH = "$env:GITHUB_WORKSPACE/triton-sdk".Replace('\', '/')
           $CmakeLines = @(
             "set(triton_INCLUDE_DIRS `"$ABS_SDK_PATH/include`")",
@@ -85,7 +90,6 @@ jobs:
           if (!(Test-Path "triton-sdk/cmake")) { New-Item -ItemType Directory -Path "triton-sdk/cmake" -Force }
           $CmakeLines | Set-Content -Path "triton-sdk/cmake/tritonConfig.cmake" -Encoding UTF8
 
-          # 6. 强力注入
           $CONDA_CMAKE_DEST = "$env:CONDA_PREFIX/Library/lib/cmake/triton"
           if (!(Test-Path $CONDA_CMAKE_DEST)) { New-Item -ItemType Directory -Path $CONDA_CMAKE_DEST -Force }
           Copy-Item "triton-sdk/cmake/tritonConfig.cmake" "$CONDA_CMAKE_DEST/tritonConfig.cmake" -Force
@@ -94,15 +98,15 @@ jobs:
         shell: pwsh
         run: |
           $LLVM_PATH = "$env:CONDA_PREFIX/Library/lib/cmake/llvm"
-          # 统一使用反斜杠，并确保路径末尾没有歧义
-          $Z3_INC = "$env:CONDA_PREFIX\Library\include"
+          # 定位到刚刚下载的原厂 Z3
+          $Z3_INC = "$env:GITHUB_WORKSPACE\z3-sdk\include"
+          $Z3_LIB = "$env:GITHUB_WORKSPACE/z3-sdk/bin/libz3.lib".Replace('\', '/')
           
           $MSVC_BASE = "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Tools/MSVC"
           $OLD_MSVC = Get-ChildItem -Path $MSVC_BASE | Where-Object { $_.Name -like "14.2*" } | Select-Object -First 1 -ExpandProperty FullName
           
-          # 将 Z3 路径显式放入 CXX_FLAGS，并使用 -I 而不是 -isystem 来强制提升优先级
           $CXX_FLAGS = "-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -D_HAS_DEPRECATED_RESULT_OF -D_CRT_SECURE_NO_WARNINGS"
-          $CXX_FLAGS += " -I`"$Z3_INC`"" 
+          $CXX_FLAGS += " -I`"$Z3_INC`""
           
           if ($null -ne $OLD_MSVC) {
              $OLD_MSVC_INC = "$OLD_MSVC\include"
@@ -118,27 +122,31 @@ jobs:
             "-DLLVM_DIR=$LLVM_PATH",
             "-DCMAKE_C_COMPILER=$env:CONDA_PREFIX/Library/bin/clang.exe",
             "-DCMAKE_CXX_COMPILER=$env:CONDA_PREFIX/Library/bin/clang++.exe",
-            "-DCMAKE_CXX_FLAGS=$CXX_FLAGS"
+            "-DCMAKE_CXX_FLAGS=$CXX_FLAGS",
+            "-DCMAKE_EXE_LINKER_FLAGS=$Z3_LIB" 
           )
+          # 预埋 Z3_LIB，防止链接阶段找不到库
 
           & cmake @cmakeArgs
 
       - name: Build Project
         shell: pwsh
         run: |
-          # 确保运行时能找到 LLVM 和 Triton 的 DLL
-          $env:PATH = "$env:CONDA_PREFIX/Library/bin;$env:GITHUB_WORKSPACE/triton-sdk/bin;$env:PATH"
+          # 把 Z3 的运行库也加进 PATH，防止编译期测试脚本找不到 DLL 报错
+          $env:PATH = "$env:CONDA_PREFIX/Library/bin;$env:GITHUB_WORKSPACE/triton-sdk/bin;$env:GITHUB_WORKSPACE/z3-sdk/bin;$env:PATH"
           cmake --build build --config Release
 
       - name: Organize and Zip Artifacts
         shell: pwsh
         run: |
           if (!(Test-Path dist)) { mkdir dist }
-          # 收集编译产物
           Get-ChildItem -Path build -Include *.exe, *.dll, *.sys -Recurse | Copy-Item -Destination dist\
-          # 收集依赖库
           if (Test-Path "triton-sdk/bin") {
             Copy-Item "triton-sdk/bin/*.dll" -Destination dist\
+          }
+          if (Test-Path "z3-sdk/bin") {
+            # 把 libz3.dll 也一起打包给最终用户
+            Copy-Item "z3-sdk/bin/*.dll" -Destination dist\
           }
           Compress-Archive -Path dist\* -DestinationPath titan-windows-x64.zip -Force
 
