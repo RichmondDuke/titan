@@ -1,0 +1,107 @@
+name: windows-build-conan
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Release]
+
+    env:
+      BUILD_DIR: build
+      CONAN_HOME: ${{ github.workspace }}\.conan2
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup MSVC Dev Cmd
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # LLVM 固定 15.0.7（提供 LLVMConfig.cmake + clang）
+      - name: Setup LLVM 15
+        uses: llvm/actions/setup-llvm@v1
+        with:
+          version: "15.0.7"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Conan 2
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install "conan>=2.0,<3.0"
+
+      # 让 conan 知道当前是 MSVC（生成 profile）
+      - name: Conan profile detect
+        shell: pwsh
+        run: |
+          conan profile detect --force
+
+      # 安装依赖（尽量走二进制：--build=missing 表示没找到二进制才编译）
+      - name: Conan install deps
+        shell: pwsh
+        run: |
+          conan install . `
+            -of "$env:BUILD_DIR\conan" `
+            -s build_type=${{ matrix.build_type }} `
+            -b missing
+
+      - name: Configure (CMake)
+        shell: pwsh
+        run: |
+          cmake -S . -B $env:BUILD_DIR `
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
+            -DCMAKE_TOOLCHAIN_FILE="$env:BUILD_DIR\conan\conan_toolchain.cmake" `
+            -DCMAKE_PREFIX_PATH="$env:BUILD_DIR\conan" `
+            -DLLVM_DIR="$env:LLVM_DIR\lib\cmake\llvm"
+
+      - name: Build titan.exe
+        shell: pwsh
+        run: |
+          cmake --build $env:BUILD_DIR --config ${{ matrix.build_type }} --parallel
+
+      # intrinsics：同之前一样，直接调用 clang 生成 64-bit ll（避免 intrinsics/CMakeLists.txt 写死 clang++）
+      - name: Build intrinsics (vmprotect64.ll)
+        shell: pwsh
+        run: |
+          $clang = Join-Path $env:LLVM_DIR "bin\clang.exe"
+          if (!(Test-Path $clang)) { throw "clang not found at $clang" }
+
+          Push-Location intrinsics
+          & $clang `
+            -std=c++17 `
+            -O3 `
+            -Iremill/include `
+            -Wno-gnu-inline-cpp-without-extern `
+            -fno-discard-value-names `
+            -fstrict-aliasing `
+            -fno-slp-vectorize `
+            -mllvm -enable-tbaa=true `
+            -emit-llvm `
+            -DADDRESS_SIZE_BITS=64 `
+            -m64 `
+            -S main.cpp `
+            -o vmprotect64.ll
+          Pop-Location
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: titan-windows-${{ matrix.build_type }}
+          path: |
+            build/titan.exe
+            build/${{ matrix.build_type }}/titan.exe
+            intrinsics/vmprotect64.ll
