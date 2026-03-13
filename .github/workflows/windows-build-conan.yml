@@ -28,8 +28,8 @@ jobs:
         run: |
           choco install -y 7zip
 
-      # LLVM 15 via Conda (conda-forge), which includes lib/cmake/llvm/LLVMConfig.cmake
-      - name: Setup Miniconda
+      # LLVM 15 via Conda (conda-forge) to ensure LLVMConfig.cmake exists
+      - name: Setup Miniconda (conda-forge)
         uses: conda-incubator/setup-miniconda@v3
         with:
           auto-update-conda: true
@@ -37,37 +37,41 @@ jobs:
           python-version: "3.11"
           channels: conda-forge
           channel-priority: strict
-          use-mamba: true
 
-      - name: Install LLVM 15 (conda-forge)
-        shell: pwsh
+      - name: Install LLVM 15 (conda)
+        shell: bash -l {0}
         run: |
-          mamba install -y llvm=15.* clang=15.* lld=15.*
+          conda info
+          conda install -y "llvm=15.*" "clang=15.*" "lld=15.*"
 
       - name: Locate LLVMConfig.cmake (from conda)
-        shell: pwsh
+        shell: bash -l {0}
         run: |
-          # CONDA_PREFIX is set by setup-miniconda
-          if (-not $env:CONDA_PREFIX) { throw "CONDA_PREFIX is not set" }
+          echo "CONDA_PREFIX=$CONDA_PREFIX"
+          if [ -z "$CONDA_PREFIX" ]; then
+            echo "CONDA_PREFIX is empty"
+            exit 1
+          fi
 
-          $cfg = Get-ChildItem -Path $env:CONDA_PREFIX -Recurse -Filter "LLVMConfig.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $cfg) {
-            Write-Host "Listing conda env root (depth 4):"
-            Get-ChildItem -Path $env:CONDA_PREFIX -Recurse -Depth 4 | Select-Object FullName
-            throw "LLVMConfig.cmake not found under CONDA_PREFIX=$env:CONDA_PREFIX"
-          }
+          LLVM_CONFIG_DIR="$(python -c "import os,sys; root=os.environ.get('CONDA_PREFIX',''); hit=''; 
+          import os as _os
+          for dp,_,fn in _os.walk(root):
+          if 'LLVMConfig.cmake' in fn:
+                hit=dp; break
+                print(hit)")"
 
-          $llvmDir = $cfg.Directory.FullName
-          Write-Host "Found LLVMConfig.cmake at: $($cfg.FullName)"
-          Write-Host "Using LLVM_DIR=$llvmDir"
-          "LLVM_DIR=$llvmDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          if [ -z "$LLVM_CONFIG_DIR" ]; then
+            echo "LLVMConfig.cmake not found under $CONDA_PREFIX"
+            exit 1
+          fi
 
-          # Ensure conda bin is on PATH for clang.exe
-          $condaBin = Join-Path $env:CONDA_PREFIX "Library\bin"
-          if (Test-Path $condaBin) {
-            Write-Host "Adding conda LLVM bin to PATH: $condaBin"
-            $condaBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          }
+          echo "Found LLVM_DIR=$LLVM_CONFIG_DIR"
+          echo "LLVM_DIR=$LLVM_CONFIG_DIR" >> "$GITHUB_ENV"
+
+          # On conda-forge Windows, executables are typically in $CONDA_PREFIX/Library/bin
+          if [ -d "$CONDA_PREFIX/Library/bin" ]; then
+            echo "$CONDA_PREFIX/Library/bin" >> "$GITHUB_PATH"
+          fi
 
       - name: Download & extract Triton prebuilt
         shell: pwsh
@@ -83,30 +87,24 @@ jobs:
 
       # Conan deps for fmt/range-v3/z3/capstone (binary when available)
       - name: Install Conan 2
-        shell: pwsh
+        shell: bash -l {0}
         run: |
           python -m pip install --upgrade pip
           pip install "conan>=2.0,<3.0"
 
       - name: Conan profile detect
-        shell: pwsh
+        shell: bash -l {0}
         run: |
           conan profile detect --force
 
       - name: Conan install deps (fmt/range-v3/z3/capstone)
-        shell: pwsh
+        shell: bash -l {0}
         run: |
-          conan install . `
-            -of "$env:BUILD_DIR\conan" `
-            -s build_type=Release `
-            -s compiler.cppstd=20 `
+          conan install . \
+            -of "${BUILD_DIR}/conan" \
+            -s build_type=Release \
+            -s compiler.cppstd=20 \
             -b missing
-
-      - name: Debug -> list Conan output folder
-        shell: pwsh
-        run: |
-          Write-Host "Listing $env:BUILD_DIR\conan"
-          Get-ChildItem -Force -Recurse "$env:BUILD_DIR\conan" | Select-Object FullName
 
       - name: Configure (CMake)
         shell: pwsh
@@ -132,43 +130,4 @@ jobs:
           $clang = Get-Command clang.exe -ErrorAction SilentlyContinue
           if (-not $clang) { throw "clang.exe not found in PATH" }
 
-          Write-Host "Using clang: $($clang.Source)"
-
-          Push-Location intrinsics
-          & $clang.Source `
-            -std=c++17 `
-            -O3 `
-            -Iremill/include `
-            -Wno-gnu-inline-cpp-without-extern `
-            -fno-discard-value-names `
-            -fstrict-aliasing `
-            -fno-slp-vectorize `
-            -mllvm -enable-tbaa=true `
-            -emit-llvm `
-            -DADDRESS_SIZE_BITS=64 `
-            -m64 `
-            -S main.cpp `
-            -o vmprotect64.ll
-          Pop-Location
-
-      - name: Add Triton bin to PATH (best-effort)
-        shell: pwsh
-        run: |
-          $binCandidates = @(
-            Join-Path "${{ env.TRITON_DIR }}" "bin"
-            Join-Path "${{ env.TRITON_DIR }}" "lib"
-          )
-          foreach ($p in $binCandidates) {
-            if (Test-Path $p) {
-              echo $p | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-            }
-          }
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: titan-windows-release
-          path: |
-            build/titan.exe
-            build/Release/titan.exe
-            intrinsics/vmprotect64.ll
+          Write-Host "Using`](#)
