@@ -186,15 +186,22 @@ jobs:
       - name: Configure titan (CMake)
         shell: pwsh
         run: |
-          $conanGen = Resolve-Path "$env:BUILD_DIR\conan\build\generators"
-          $toolchain = Join-Path $conanGen "conan_toolchain.cmake"
-          $prefixPath = "$($conanGen.Path);$env:CONDA_PREFIX\Library;$env:TRITON_INSTALL_DIR"
+          # Find conan_toolchain.cmake wherever Conan 2 placed it
+          $toolchain = Get-ChildItem -Path "$env:BUILD_DIR\conan" -Filter "conan_toolchain.cmake" -Recurse -ErrorAction Stop |
+                       Select-Object -First 1
+          if (-not $toolchain) { throw "conan_toolchain.cmake not found under $env:BUILD_DIR\conan" }
+          $conanGen = $toolchain.DirectoryName
+
+          $prefixPath = "$conanGen;$env:CONDA_PREFIX\Library;$env:TRITON_INSTALL_DIR"
 
           cmake -S . -B "$env:BUILD_DIR" -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
             -DCMAKE_PREFIX_PATH="$prefixPath" `
             -DLLVM_DIR="$env:LLVM_DIR" `
             -Dtriton_DIR="$env:TRITON_INSTALL_DIR\lib\cmake\triton" `
+            -DBOOST_ROOT="$conanGen" `
+            -DBoost_NO_SYSTEM_PATHS=ON `
+            -DBOOST_NO_BOOST_CMAKE=OFF `
             -DTITAN_BUILD_INTRINSICS=OFF `
             -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
 
