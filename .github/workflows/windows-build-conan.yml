@@ -48,6 +48,7 @@ jobs:
         shell: pwsh
         run: |
           "TRITON_INSTALL_DIR=$env:RUNNER_TEMP\triton-install" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "TRITON_INSTALL_DIR=$env:RUNNER_TEMP\triton-install"
 
       - name: Setup Python (for Conan)
         uses: actions/setup-python@v5
@@ -61,7 +62,7 @@ jobs:
           pip install "conan>=2.0,<3.0"
           conan profile detect --force
 
-      - name: Conan install Z3 for Triton (CMakeDeps)
+      - name: Conan install Z3 for Triton (CMakeDeps + env files)
         shell: pwsh
         run: |
           if (Test-Path "${{ env.TRITON_DEPS_DIR }}") { Remove-Item -Recurse -Force "${{ env.TRITON_DEPS_DIR }}" }
@@ -70,28 +71,30 @@ jobs:
             -of "${{ env.TRITON_DEPS_DIR }}" `
             -s build_type=Release `
             -g CMakeDeps `
+            -g VirtualBuildEnv `
+            -g VirtualRunEnv `
             -b missing
 
-          Write-Host "TRITON_DEPS_DIR listing:"
-          Get-ChildItem -Force -Path "${{ env.TRITON_DEPS_DIR }}" | Select-Object FullName
+          Write-Host "Listing TRITON_DEPS_DIR (Conan generators are written here):"
+          Get-ChildItem -Force -Path "${{ env.TRITON_DEPS_DIR }}" | Select-Object Name,FullName
 
-          $gen = Join-Path "${{ env.TRITON_DEPS_DIR }}" "generators"
-          if (!(Test-Path $gen)) { throw "Expected Conan generators dir not found: $gen" }
-          Write-Host "Generators listing:"
-          Get-ChildItem -Force -Path $gen | Select-Object FullName
+          $cb = Join-Path "${{ env.TRITON_DEPS_DIR }}" "conanbuild.bat"
+          if (!(Test-Path $cb)) { throw "conanbuild.bat not found at $cb" }
+          "TRITON_CONANBUILD_BAT=$cb" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Extract Z3 include/lib from Conan CMakeDeps data file
+      - name: Extract Z3 include/lib from Conan CMakeDeps data file (root folder)
         shell: pwsh
         run: |
-          $gen = Join-Path "${{ env.TRITON_DEPS_DIR }}" "generators"
+          $root = Resolve-Path "${{ env.TRITON_DEPS_DIR }}"
 
-          # Conan CMakeDeps emits *-data.cmake files; name depends on package naming.
-          $data = Get-ChildItem -Path $gen -File -Filter "*z3*-data.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $data) { $data = Get-ChildItem -Path $gen -File -Filter "*Z3*-data.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1 }
+          # CMakeDeps puts package files at root, e.g. Z3-*-data.cmake
+          $data = Get-ChildItem -Path $root -File -Include "*Z3*-data.cmake","*z3*-data.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $data) {
-            Write-Host "No *z3*-data.cmake found. Showing generators files:"
-            Get-ChildItem -Path $gen -File | Select-Object Name,FullName
-            throw "z3 data file not found in Conan generators"
+            Write-Host "No *Z3*-data.cmake found in $root. Files:"
+            Get-ChildItem -Path $root -File | Select-Object Name
+            # Don't hard-fail: we will rely on conanbuild.bat env injection instead
+            Write-Host "WARN: Z3 data file not found; will rely on conanbuild.bat env for Triton to find Z3."
+            exit 0
           }
 
           $txt = Get-Content $data.FullName -Raw
@@ -103,44 +106,37 @@ jobs:
             return ""
           }
 
-          # Try common variable spellings produced by CMakeDeps
-          $incDirs = Get-CMakeSetValue "z3_INCLUDE_DIRS"
-          if (-not $incDirs) { $incDirs = Get-CMakeSetValue "Z3_INCLUDE_DIRS" }
+          $incDirs = Get-CMakeSetValue "Z3_INCLUDE_DIRS"
+          if (-not $incDirs) { $incDirs = Get-CMakeSetValue "z3_INCLUDE_DIRS" }
 
-          $libDirs = Get-CMakeSetValue "z3_LIB_DIRS"
-          if (-not $libDirs) { $libDirs = Get-CMakeSetValue "Z3_LIB_DIRS" }
+          $libDirs = Get-CMakeSetValue "Z3_LIB_DIRS"
+          if (-not $libDirs) { $libDirs = Get-CMakeSetValue "z3_LIB_DIRS" }
 
-          $libs = Get-CMakeSetValue "z3_LIBS"
-          if (-not $libs) { $libs = Get-CMakeSetValue "Z3_LIBS" }
+          $libs = Get-CMakeSetValue "Z3_LIBS"
+          if (-not $libs) { $libs = Get-CMakeSetValue "z3_LIBS" }
 
           if (-not $incDirs -or -not $libDirs -or -not $libs) {
-            Write-Host "Failed to parse include/lib dirs/libs from data. Dumping first 2000 chars:"
-            Write-Host ($txt.Substring(0, [Math]::Min($txt.Length, 2000)))
-            throw "Could not parse z3 include/lib from Conan data file"
+            Write-Host "WARN: Could not parse Z3_INCLUDE_DIRS/LIB_DIRS/LIBS from data file; relying on conanbuild.bat env."
+            exit 0
           }
 
-          # Take first entry if semicolon-separated
           $inc = $incDirs.Split(';')[0]
           $libDir = $libDirs.Split(';')[0]
           $libName = $libs.Split(';')[0]
 
-          # Convert library name to full path. On Windows it is usually 'z3' and the file is z3.lib
           $candidates = @(
             (Join-Path $libDir "$libName.lib"),
             (Join-Path $libDir "z3.lib"),
             (Join-Path $libDir "libz3.lib")
           )
-
           $libPath = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $libPath) {
-            Write-Host "No expected lib found. Listing libDir:"
-            Get-ChildItem -Path $libDir -Filter "*.lib" -ErrorAction SilentlyContinue | Select-Object FullName
-            throw "Failed to locate z3 .lib under $libDir"
+            Write-Host "WARN: Could not resolve a .lib path under $libDir; relying on conanbuild.bat env."
+            exit 0
           }
 
           "Z3_INCLUDE_DIR=$inc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "Z3_LIBRARY=$libPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
           Write-Host "Z3_INCLUDE_DIR=$inc"
           Write-Host "Z3_LIBRARY=$libPath"
 
@@ -163,21 +159,33 @@ jobs:
           git -C "${{ env.TRITON_SRC_DIR }}" checkout v0.9
           git -C "${{ env.TRITON_SRC_DIR }}" rev-parse HEAD
 
-      - name: Configure Triton (MSVC only; explicit Z3 paths)
+      - name: Configure Triton (MSVC only; Z3 from Conan env; explicit vars if available)
         shell: pwsh
         run: |
           $src = "${{ env.TRITON_SRC_DIR }}"
           $bld = "_deps\triton-build"
           $inst = "$env:TRITON_INSTALL_DIR"
           $llvm = "$env:LLVM_DIR"
+          $cb = "$env:TRITON_CONANBUILD_BAT"
 
-          cmd /c "cmake -S `"$src`" -B `"$bld`" -G `"Visual Studio 17 2022`" -A x64 -DCMAKE_INSTALL_PREFIX=`"$inst`" -DLLVM_DIR=`"$llvm`" -DZ3_INCLUDE_DIR=`"$env:Z3_INCLUDE_DIR`" -DZ3_LIBRARY=`"$env:Z3_LIBRARY`" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl"
+          $z3inc = $env:Z3_INCLUDE_DIR
+          $z3lib = $env:Z3_LIBRARY
+
+          $z3Args = ""
+          if ($z3inc -and $z3lib) {
+            $z3Args = "-DZ3_INCLUDE_DIR=`"$z3inc`" -DZ3_LIBRARY=`"$z3lib`""
+            Write-Host "Using explicit Z3 args: $z3Args"
+          } else {
+            Write-Host "Z3_INCLUDE_DIR/Z3_LIBRARY not set; relying on conanbuild.bat env."
+          }
+
+          cmd /c "call `"$cb`" && cmake -S `"$src`" -B `"$bld`" -G `"Visual Studio 17 2022`" -A x64 -DCMAKE_INSTALL_PREFIX=`"$inst`" -DLLVM_DIR=`"$llvm`" $z3Args -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl"
 
       - name: Build & install Triton
         shell: pwsh
         run: |
-          cmake --build "_deps\triton-build" --config Release --parallel
-          cmake --install "_deps\triton-build" --config Release
+          $cb = "$env:TRITON_CONANBUILD_BAT"
+          cmd /c "call `"$cb`" && cmake --build `_deps\triton-build` --config Release --parallel && cmake --install `_deps\triton-build` --config Release"
 
       - name: Configure titan (CMake)
         shell: pwsh
