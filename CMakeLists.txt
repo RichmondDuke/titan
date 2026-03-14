@@ -5,6 +5,10 @@ project(titan)
 option(TITAN_BUILD_INTRINSICS "Build intrinsics targets (may not work on MSVC/Windows)" ON)
 
 # Packages
+# Packages
+find_package(ZLIB REQUIRED)
+find_package(LibXml2 REQUIRED)
+
 find_package(fmt CONFIG REQUIRED)
 find_package(LLVM 15.0 CONFIG REQUIRED)
 find_package(triton CONFIG REQUIRED)
