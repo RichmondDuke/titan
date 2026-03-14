@@ -3,15 +3,7 @@ fmt/10.2.1
 range-v3/0.12.0
 capstone/5.0.1
 z3/4.12.2
-
-# Triton：ConanCenter 是否有 JonathanSalwan/Triton 的包取决于当前生态。
-# 如果没有现成包，你只能用：
-# 1) 你自己的 Conan remote（上传你打好的二进制包）
-# 或
-# 2) GitHub Releases/私有存储的预编译 Triton，并手工设置 triton_DIR
-#
-# 这里先占位（需要你确认可用来源）
-# triton/x.y.z
+boost/1.85.0
 
 [generators]
 CMakeToolchain
@@ -22,3 +14,4 @@ cmake_layout
 
 [options]
 fmt/*:header_only=False
+boost/*:header_only=True
