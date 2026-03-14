@@ -180,7 +180,7 @@ jobs:
           cmake -S . -B "${BUILD_DIR}" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}" \
-            -DCMAKE_PREFIX_PATH="${CONAN_GEN}" \
+            -DCMAKE_PREFIX_PATH="${CONAN_GEN};${CONDA_PREFIX}/Library" \
             -DCMAKE_CXX_FLAGS_INIT="/I${LLVM_INCLUDE_DIR}" \
             -DCMAKE_C_FLAGS_INIT="/I${LLVM_INCLUDE_DIR}" \
             -DLLVM_DIR="${LLVM_DIR}" \
