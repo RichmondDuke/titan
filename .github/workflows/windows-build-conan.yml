@@ -1,4 +1,4 @@
-name: windows-llvm15-triton-prebuilt
+name: windows-llvm15-triton-headers-from-git
 
 on:
   push:
@@ -11,8 +11,8 @@ jobs:
 
     env:
       BUILD_DIR: build
-      TRITON_URL: https://github.com/JonathanSalwan/Triton/releases/download/v0.9/triton-x64-vs2019-py37.release.7z
-      TRITON_DIR: ${{ github.workspace }}\_deps\triton
+      TRITON_BIN_URL: https://github.com/JonathanSalwan/Triton/releases/download/v0.9/triton-x64-vs2019-py37.release.7z
+      TRITON_BIN_DIR: ${{ github.workspace }}\_deps\triton-bin
       TRITON_SRC_DIR: ${{ github.workspace }}\_deps\triton-src
       TRITON_GEN_DIR: ${{ github.workspace }}\_deps\triton-generated
 
@@ -25,11 +25,6 @@ jobs:
       - name: Setup MSVC Dev Cmd
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Install tools (7zip)
-        shell: pwsh
-        run: |
-          choco install -y 7zip
-
       - name: Setup Miniconda (conda-forge)
         uses: conda-incubator/setup-miniconda@v3
         with:
@@ -39,44 +34,57 @@ jobs:
           channels: conda-forge
           channel-priority: strict
 
-      - name: Install LLVM 15 (conda, llvmdev)
+      - name: Install LLVM 15 dev (conda-forge llvmdev)
         shell: bash -l {0}
         run: |
           set -euo pipefail
           conda info
-          conda install -y "llvmdev=15.*" "clang=15.*" "lld=15.*"
+          conda install -y "llvmdev=15.*" "clang=15.*" "lld=15.*" zlib libxml2
           echo "CONDA_PREFIX=$CONDA_PREFIX"
           test -n "${CONDA_PREFIX:-}"
 
-          # On conda-forge Windows, executables are typically in $CONDA_PREFIX/Library/bin
-          if [ -d "$CONDA_PREFIX/Library/bin" ]; then
-            echo "$CONDA_PREFIX/Library/bin" >> "$GITHUB_PATH"
-          fi
-
-      - name: Export LLVM_DIR (find LLVMConfig.cmake in conda env)
+      - name: Export LLVM_DIR and LLVM include dir (conda env)
         shell: pwsh
         run: |
           if (-not $env:CONDA_PREFIX) { throw "CONDA_PREFIX is not set" }
 
+          $condaBin = Join-Path $env:CONDA_PREFIX "Library\bin"
+          if (Test-Path $condaBin) {
+            $condaBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+
           $cfg = Get-ChildItem -Path $env:CONDA_PREFIX -Recurse -Filter "LLVMConfig.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $cfg) { throw "LLVMConfig.cmake not found under $env:CONDA_PREFIX" }
-
           "LLVM_DIR=$($cfg.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "LLVM_DIR=$($cfg.Directory.FullName)"
 
-      - name: Download & extract Triton prebuilt
+          $incCandidates = @(
+            (Join-Path $env:CONDA_PREFIX "Library\include"),
+            (Join-Path $env:CONDA_PREFIX "include")
+          )
+          $llvmInc = $incCandidates | Where-Object { Test-Path (Join-Path $_ "llvm\ADT\StringRef.h") } | Select-Object -First 1
+          if (-not $llvmInc) {
+            Write-Host "Could not find llvm headers under CONDA_PREFIX. Candidates:"
+            $incCandidates | ForEach-Object { Write-Host " - $_" }
+            throw "LLVM include dir not found"
+          }
+          "LLVM_INCLUDE_DIR=$llvmInc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "LLVM_INCLUDE_DIR=$llvmInc"
+
+      - name: Install tools (7zip)
+        shell: pwsh
+        run: |
+          choco install -y 7zip
+
+      - name: Download & extract Triton prebuilt (lib/bin)
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force "_deps" | Out-Null
           $archive = Join-Path $env:RUNNER_TEMP "triton.7z"
-          Invoke-WebRequest -Uri "${{ env.TRITON_URL }}" -OutFile $archive
-          New-Item -ItemType Directory -Force "${{ env.TRITON_DIR }}" | Out-Null
-          & 7z x $archive "-o${{ env.TRITON_DIR }}" -y
+          Invoke-WebRequest -Uri "${{ env.TRITON_BIN_URL }}" -OutFile $archive
+          New-Item -ItemType Directory -Force "${{ env.TRITON_BIN_DIR }}" | Out-Null
+          & 7z x $archive "-o${{ env.TRITON_BIN_DIR }}" -y
 
-          Write-Host "Triton extracted to ${{ env.TRITON_DIR }}"
-          Get-ChildItem -Force -Recurse -Depth 3 "${{ env.TRITON_DIR }}" | Select-Object FullName
-
-      - name: Clone Triton headers (source)
+      - name: Clone Triton source (headers)
         shell: pwsh
         run: |
           if (Test-Path "${{ env.TRITON_SRC_DIR }}") { Remove-Item -Recurse -Force "${{ env.TRITON_SRC_DIR }}" }
@@ -86,18 +94,14 @@ jobs:
           $hdrRoot = Join-Path "${{ env.TRITON_SRC_DIR }}" "src\libtriton\includes"
           if (!(Test-Path (Join-Path $hdrRoot "triton"))) { throw "Expected headers not found under: $hdrRoot" }
 
-      - name: Create Triton CMake package shim (tritonConfig.cmake)
+      - name: Generate minimal triton/config.hpp (no Triton build)
         shell: pwsh
         run: |
-          $binRoot = "${{ env.TRITON_DIR }}"
-          $srcRoot = "${{ env.TRITON_SRC_DIR }}"
           $genRoot = "${{ env.TRITON_GEN_DIR }}"
-
-          # Generate minimal triton/config.hpp (Triton headers include it, but it is normally generated by Triton build)
           $cfgDir = Join-Path $genRoot "triton"
           New-Item -ItemType Directory -Force $cfgDir | Out-Null
-          $cfgPath = Join-Path $cfgDir "config.hpp"
 
+          $cfgPath = Join-Path $cfgDir "config.hpp"
           @"
           #ifndef TRITON_CONFIG_HPP
           #define TRITON_CONFIG_HPP
@@ -113,18 +117,24 @@ jobs:
           #endif
           "@ | Set-Content -Path $cfgPath -Encoding UTF8
 
+      - name: Generate tritonConfig.cmake shim (headers from git + generated config + lib from 7z)
+        shell: pwsh
+        run: |
+          $srcRoot = "${{ env.TRITON_SRC_DIR }}"
+          $binRoot = "${{ env.TRITON_BIN_DIR }}"
+          $genRoot = "${{ env.TRITON_GEN_DIR }}"
+
           $includeGit = Join-Path $srcRoot "src\libtriton\includes"
           $includeGen = $genRoot
 
-          # find Triton import library in the prebuilt archive
           $lib = Get-ChildItem -Path $binRoot -Recurse -Filter "triton*.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $lib) { $lib = Get-ChildItem -Path $binRoot -Recurse -Filter "*.lib" -ErrorAction SilentlyContinue | Select-Object -First 1 }
-          if (-not $lib) { throw "No import library (.lib) found under $binRoot" }
+          if (-not $lib) { throw "No import library (.lib) found in Triton prebuilt archive." }
 
           $shimDir = Join-Path $env:RUNNER_TEMP "triton-cmake"
           New-Item -ItemType Directory -Force $shimDir | Out-Null
 
-          $cmakeCfg = Join-Path $shimDir "tritonConfig.cmake"
+          $cfgPath = Join-Path $shimDir "tritonConfig.cmake"
           $inc1 = $includeGen.Replace('\','/')
           $inc2 = $includeGit.Replace('\','/')
           $libPath = $lib.FullName.Replace('\','/')
@@ -138,11 +148,9 @@ jobs:
               INTERFACE_INCLUDE_DIRECTORIES "$inc1;$inc2"
             )
           endif()
-          "@ | Set-Content -Path $cmakeCfg -Encoding UTF8
+          "@ | Set-Content -Path $cfgPath -Encoding UTF8
 
           "triton_DIR=$($shimDir)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "triton_DIR=$shimDir"
-          Write-Host "Generated $cmakeCfg"
 
       - name: Setup Python (for Conan)
         uses: actions/setup-python@v5
@@ -160,37 +168,49 @@ jobs:
         run: |
           conan profile detect --force
 
-      - name: Conan install deps (fmt/range-v3/z3/capstone)
+      - name: Conan install deps (fmt/range-v3/z3/capstone) + VirtualBuildEnv
         shell: pwsh
         run: |
           conan install . `
             -of "$env:BUILD_DIR\conan" `
             -s build_type=Release `
             -s compiler.cppstd=20 `
+            -g CMakeDeps `
+            -g CMakeToolchain `
+            -g VirtualBuildEnv `
+            -g VirtualRunEnv `
             -b missing
 
-      - name: Configure (CMake)
+      - name: Locate conanbuild.bat
+        shell: pwsh
+        run: |
+          $root = Resolve-Path "$env:BUILD_DIR\conan"
+          $bat = Get-ChildItem -Path $root -Recurse -Filter "conanbuild.bat" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $bat) { throw "conanbuild.bat not found under $root" }
+          "CONANBUILD_BAT=$($bat.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "CONANBUILD_BAT=$($bat.FullName)"
+
+      - name: Configure titan (CMake) with conanbuild + LLVM INCLUDE
         shell: pwsh
         run: |
           $conanGen = Resolve-Path "$env:BUILD_DIR\conan\build\generators"
           $toolchain = Join-Path $conanGen "conan_toolchain.cmake"
 
-          cmake -S . -B $env:BUILD_DIR `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
-            -DCMAKE_PREFIX_PATH="$($conanGen.Path)" `
-            -DLLVM_DIR="$env:LLVM_DIR" `
-            -Dtriton_DIR="$env:triton_DIR"
+          $buildDir = $env:BUILD_DIR
+          $prefixPath = $conanGen.Path
+          $llvmDir = $env:LLVM_DIR
+          $llvmInc = $env:LLVM_INCLUDE_DIR
+          $tritonDir = $env:triton_DIR
+          $conanBat = $env:CONANBUILD_BAT
 
-      - name: Build titan.exe (skip intrinsics on Windows)
+          # Use cmd so INCLUDE affects cl.exe and MSBuild-generated projects.
+          cmd /c "call `"$conanBat`" && set `"INCLUDE=$llvmInc;%INCLUDE%`" && cmake -S . -B `"$buildDir`" -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=`"$toolchain`" -DCMAKE_PREFIX_PATH=`"$prefixPath`" -DLLVM_DIR=`"$llvmDir`" -Dtriton_DIR=`"$tritonDir`""
+
+      - name: Build titan.exe (skip intrinsics on Windows) with conanbuild + LLVM INCLUDE
         shell: pwsh
         run: |
-          cmake --build $env:BUILD_DIR --config Release --target titan --parallel
+          $buildDir = $env:BUILD_DIR
+          $llvmInc = $env:LLVM_INCLUDE_DIR
+          $conanBat = $env:CONANBUILD_BAT
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: titan-windows-release
-          path: |
-            build/titan.exe
-            build/Release/titan.exe
+          cmd /c "call `"$conanBat`" && set `"INCLUDE=$llvmInc;%INCLUDE%`" && cmake --build `"$buildDir`" --config Release --target titan --parallel"
