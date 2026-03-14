@@ -72,42 +72,75 @@ jobs:
             -g CMakeToolchain `
             -b missing
 
-      - name: Install Z3 for Triton via Conan and locate headers/libs in cache
+      - name: Install Z3 for Triton and export package_folder (Conan JSON)
         shell: pwsh
         run: |
           $ref = "z3/${{ env.Z3_VERSION }}"
 
-          conan install --requires="$ref" -s build_type=Release -b missing
+          $jsonPath = Join-Path $env:RUNNER_TEMP "conan-z3.json"
 
-          $root = (conan cache path $ref).Trim()
-          if (-not $root) { throw "conan cache path returned empty for $ref" }
-          if (!(Test-Path $root)) { throw "conan cache path does not exist: $root" }
+          # Install Z3 and ask Conan for machine-readable output containing the resolved package folder
+          conan install --requires="$ref" -s build_type=Release -b missing --format=json | Out-File -FilePath $jsonPath -Encoding utf8
 
-          Write-Host ("Conan cache root for {0}: {1}" -f $ref, $root)
+          $j = Get-Content $jsonPath -Raw | ConvertFrom-Json
 
-          $hdr = Get-ChildItem -Path $root -Recurse -File -Filter "z3.h" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $hdr) {
-            Write-Host "Could not find z3.h under cache root. Showing first 200 files:"
-            Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue | Select-Object FullName | Select-Object -First 200
-            throw "z3.h not found under Conan cache root for $ref"
+          # Conan 2 JSON structure: try several known shapes (it has changed across versions).
+          $pkgFolder = $null
+
+          # Shape A: j.graph.nodes[]
+          if ($j.graph -and $j.graph.nodes) {
+            foreach ($n in $j.graph.nodes) {
+              if ($n.ref -like "z3/*") {
+                if ($n.package_folder) { $pkgFolder = $n.package_folder; break }
+                if ($n.packageFolder) { $pkgFolder = $n.packageFolder; break }
+              }
+            }
           }
-          $inc = $hdr.Directory.FullName
-          Write-Host ("Found z3.h: {0}" -f $hdr.FullName)
-          Write-Host ("Z3 include dir: {0}" -f $inc)
 
-          $lib = Get-ChildItem -Path $root -Recurse -File -Filter "*.lib" -ErrorAction SilentlyContinue |
+          # Shape B: j.nodes[]
+          if (-not $pkgFolder -and $j.nodes) {
+            foreach ($n in $j.nodes) {
+              if ($n.ref -like "z3/*") {
+                if ($n.package_folder) { $pkgFolder = $n.package_folder; break }
+                if ($n.packageFolder) { $pkgFolder = $n.packageFolder; break }
+              }
+            }
+          }
+
+          if (-not $pkgFolder) {
+            Write-Host "Could not find z3 package_folder in Conan JSON. Dumping first 2000 chars:"
+            $raw = Get-Content $jsonPath -Raw
+            Write-Host $raw.Substring(0, [Math]::Min(2000, $raw.Length))
+            throw "Failed to locate z3 package_folder from Conan JSON output"
+          }
+
+          if (!(Test-Path $pkgFolder)) { throw "Resolved package_folder does not exist: $pkgFolder" }
+
+          $inc = Join-Path $pkgFolder "include"
+          $libDir = Join-Path $pkgFolder "lib"
+
+          if (!(Test-Path (Join-Path $inc "z3.h"))) {
+            Write-Host ("Listing include dir {0}:" -f $inc)
+            Get-ChildItem -Force -Path $inc -ErrorAction SilentlyContinue | Select-Object FullName
+            throw "Expected z3.h not found under $inc"
+          }
+
+          $lib = Get-ChildItem -Path $libDir -Filter "*.lib" -File -ErrorAction SilentlyContinue |
                  Where-Object { $_.Name -match 'z3' } |
                  Select-Object -First 1
-          if (-not $lib) {
-            Write-Host "Could not find any z3*.lib under cache root. Showing first 200 libs:"
-            Get-ChildItem -Path $root -Recurse -File -Filter "*.lib" -ErrorAction SilentlyContinue | Select-Object FullName | Select-Object -First 200
-            throw "z3 .lib not found under Conan cache root for $ref"
-          }
 
-          Write-Host ("Z3 library: {0}" -f $lib.FullName)
+          if (-not $lib) {
+            Write-Host ("Listing lib dir {0}:" -f $libDir)
+            Get-ChildItem -Force -Path $libDir -ErrorAction SilentlyContinue | Select-Object FullName
+            throw "No z3-related .lib found under $libDir"
+          }
 
           "Z3_INCLUDE_DIR=$inc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "Z3_LIBRARY=$($lib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Write-Host ("Z3 package_folder: {0}" -f $pkgFolder)
+          Write-Host ("Z3_INCLUDE_DIR={0}" -f $inc)
+          Write-Host ("Z3_LIBRARY={0}" -f $lib.FullName)
 
       - name: Clone Triton source
         shell: pwsh
