@@ -194,36 +194,46 @@ jobs:
           git -C "_deps\triton-src" checkout "v0.9"
           git -C "_deps\triton-src" rev-parse HEAD
 
-      # ★ 关键修复：在 configure 之前，先查看 Triton v0.9 CMakeLists 里真正的
-      #   Python 开关变量名，然后用全量 OFF 确保不编译任何 Python 绑定
-      - name: Patch Triton CMakeLists to force-disable Python bindings
+      # 直接从 Triton 源码的 libtriton CMakeLists.txt 中删除 Python 绑定相关的
+      # install() 和 target 定义，这是最彻底的方式，不依赖变量名猜测
+      - name: Patch Triton source to remove Python bindings install rules
         shell: pwsh
         run: |
-          $cml = "_deps\triton-src\src\libtriton\CMakeLists.txt"
-          $content = Get-Content $cml -Raw
+          $libCml = "_deps\triton-src\src\libtriton\CMakeLists.txt"
+          $raw = Get-Content $libCml -Raw
 
-          # 找出所有涉及 PYTHON 的 option/set 行，输出供调试
-          Write-Host "=== Triton Python-related CMake variables ==="
-          $content -split "`n" | Where-Object { $_ -match 'PYTHON|python' } | ForEach-Object { Write-Host $_ }
-          Write-Host "============================================="
+          # 打印所有含 PYTHON/python/pyd/.pyd 的行，供调试确认
+          Write-Host "=== Triton libtriton CMakeLists.txt Python-related lines ==="
+          $raw -split "`n" | Select-String -Pattern 'PYTHON|python|\.pyd|bindings' | ForEach-Object { Write-Host $_.Line }
+          Write-Host "============================================================"
 
-          # 直接在源码顶层 CMakeLists 里强制 set 所有已知变量
+          # 策略：将整个 if(PYTHON_BINDINGS) ... endif() 代码块注释掉
+          # 用正则把 if(PYTHON_BINDINGS 开头、到对应 endif() 的整块替换为空
+          # 由于 CMake 的 if/endif 嵌套复杂，改用更安全的方式：
+          # 直接删除包含 triton.pyd / PYTHON_BINDINGS / python bindings 的 install() 行
+          $patched = $raw `
+            -replace '(?m)^[^\r\n]*install[^\r\n]*triton\.pyd[^\r\n]*(\r?\n)?', '' `
+            -replace '(?m)^[^\r\n]*install[^\r\n]*PYTHON_BINDINGS[^\r\n]*(\r?\n)?', '' `
+            -replace '(?m)^[^\r\n]*\.pyd[^\r\n]*(\r?\n)?', ''
+
+          Set-Content $libCml $patched -Encoding utf8
+          Write-Host "Patched $libCml - removed .pyd install lines"
+
+          # 同时 patch 顶层 CMakeLists.txt，强制关闭所有 Python 开关
           $topCml = "_deps\triton-src\CMakeLists.txt"
-          $topContent = Get-Content $topCml -Raw
-
-          # 在 project() 行之后插入强制关闭语句
-          $inject = @"
-
-          # ---- injected by CI: disable all Python bindings ----
-          set(PYTHON_BINDINGS         OFF CACHE BOOL "" FORCE)
-          set(WITH_PYTHON_BINDINGS    OFF CACHE BOOL "" FORCE)
+          $topRaw = Get-Content $topCml -Raw
+          # 在文件最顶部（cmake_minimum_required 之后）插入强制关闭
+          $forceOff = @'
+          # --- CI PATCH: disable Python bindings ---
+          set(PYTHON_BINDINGS          OFF CACHE BOOL "" FORCE)
+          set(WITH_PYTHON_BINDINGS     OFF CACHE BOOL "" FORCE)
           set(TRITON_BUILD_PYTHON_BINDINGS OFF CACHE BOOL "" FORCE)
-          # -------------------------------------------------------
-          "@
-          # 找到 project( 行并在其后插入
-          $topContent = $topContent -replace '(project\([^\)]*\))', "`$1`n$inject"
-          Set-Content $topCml $topContent -Encoding utf8
-          Write-Host "Patched $topCml"
+          # ------------------------------------------
+          '@
+          # 在 cmake_minimum_required 行之后插入
+          $topPatched = $topRaw -replace '(cmake_minimum_required\([^\)]*\))', "`$1`n$forceOff"
+          Set-Content $topCml $topPatched -Encoding utf8
+          Write-Host "Patched $topCml - forced Python bindings OFF"
 
       - name: Configure Triton (MSVC; explicit Z3+Capstone; LLVM from conda)
         shell: pwsh
@@ -249,11 +259,22 @@ jobs:
       - name: Build & install Triton
         shell: pwsh
         run: |
-          cmake --build "_deps\triton-build" --config Release --parallel
+          # 先验证 triton 主库目标存在，再 build
+          cmake --build "_deps\triton-build" --config Release --target triton --parallel
+          if ($LASTEXITCODE -ne 0) { throw "Triton build failed" }
+
           cmake --install "_deps\triton-build" --config Release
+          if ($LASTEXITCODE -ne 0) { throw "Triton install failed" }
+
+          # 验证关键文件确实存在
           if (!(Test-Path "$env:TRITON_INSTALL_DIR\lib\cmake\triton\tritonConfig.cmake")) {
             throw "tritonConfig.cmake not found after install"
           }
+          if (!(Test-Path "$env:TRITON_INSTALL_DIR\lib\triton.lib")) {
+            throw "triton.lib not found after install - build may have failed silently"
+          }
+          Write-Host "Triton installed successfully:"
+          Get-ChildItem "$env:TRITON_INSTALL_DIR\lib" | Select-Object Name | ForEach-Object { Write-Host "  $($_.Name)" }
 
       - name: Configure titan (CMake)
         shell: pwsh
