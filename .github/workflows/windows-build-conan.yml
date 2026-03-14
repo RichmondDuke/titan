@@ -62,11 +62,8 @@ jobs:
             (Join-Path $env:CONDA_PREFIX "include")
           )
           $llvmInc = $incCandidates | Where-Object { Test-Path (Join-Path $_ "llvm\ADT\StringRef.h") } | Select-Object -First 1
-          if (-not $llvmInc) {
-            Write-Host "Could not find llvm headers under CONDA_PREFIX. Candidates:"
-            $incCandidates | ForEach-Object { Write-Host " - $_" }
-            throw "LLVM include dir not found"
-          }
+          if (-not $llvmInc) { throw "LLVM include dir not found" }
+
           "LLVM_INCLUDE_DIR=$llvmInc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "LLVM_INCLUDE_DIR=$llvmInc"
 
@@ -188,7 +185,6 @@ jobs:
           $bat = Get-ChildItem -Path $root -Recurse -Filter "conanbuild.bat" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $bat) { throw "conanbuild.bat not found under $root" }
           "CONANBUILD_BAT=$($bat.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "CONANBUILD_BAT=$($bat.FullName)"
 
       - name: Configure titan (CMake) with conanbuild + LLVM INCLUDE
         shell: pwsh
@@ -203,7 +199,6 @@ jobs:
           $tritonDir = $env:triton_DIR
           $conanBat = $env:CONANBUILD_BAT
 
-          # Use cmd so INCLUDE affects cl.exe and MSBuild-generated projects.
           cmd /c "call `"$conanBat`" && set `"INCLUDE=$llvmInc;%INCLUDE%`" && cmake -S . -B `"$buildDir`" -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=`"$toolchain`" -DCMAKE_PREFIX_PATH=`"$prefixPath`" -DLLVM_DIR=`"$llvmDir`" -Dtriton_DIR=`"$tritonDir`""
 
       - name: Build titan.exe (skip intrinsics on Windows) with conanbuild + LLVM INCLUDE
