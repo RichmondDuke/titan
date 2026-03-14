@@ -14,14 +14,6 @@ jobs:
       TRITON_SRC_DIR: ${{ github.workspace }}\_deps\triton-src
 
     steps:
-
-
-      - name: Set TRITON_INSTALL_DIR
-        shell: pwsh
-        run: |
-          "TRITON_INSTALL_DIR=$env:RUNNER_TEMP\triton-install" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-           Write-Host "TRITON_INSTALL_DIR=$env:RUNNER_TEMP\triton-install"
-    
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
         with:
@@ -39,23 +31,26 @@ jobs:
           channels: conda-forge
           channel-priority: strict
 
-      - name: Install LLVM 15 dev (conda-forge llvmdev)
+      - name: Install LLVM 15 dev (conda-forge llvmdev) + deps
         shell: bash -l {0}
         run: |
           set -euo pipefail
           conda info
-          conda install -y "llvmdev=15.*" "clang=15.*" "lld=15.*" zlib libxml2 cmake ninja
+          # Keep LLVM/headers/libs in conda; build with MSVC (cl) not conda clang
+          conda install -y "llvmdev=15.*" "lld=15.*" zlib libxml2 cmake ninja
           echo "CONDA_PREFIX=$CONDA_PREFIX"
           test -n "${CONDA_PREFIX:-}"
-          echo "$CONDA_PREFIX/Library/bin" >> "$GITHUB_PATH"
 
-      - name: Export LLVM_DIR (conda)
-        shell: bash -l {0}
-        run: |
-          set -euo pipefail
+          # Export LLVM_DIR for CMake find_package(LLVM CONFIG)
           LLVM_DIR="$CONDA_PREFIX/Library/lib/cmake/llvm"
           test -d "$LLVM_DIR"
           echo "LLVM_DIR=$LLVM_DIR" >> "$GITHUB_ENV"
+
+      - name: Set TRITON_INSTALL_DIR (avoid ${{ runner.temp }} yaml issues)
+        shell: pwsh
+        run: |
+          "TRITON_INSTALL_DIR=$env:RUNNER_TEMP\triton-install" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "TRITON_INSTALL_DIR=$env:RUNNER_TEMP\triton-install"
 
       - name: Setup Python (for Conan)
         uses: actions/setup-python@v5
@@ -89,20 +84,26 @@ jobs:
           rm -rf "_deps/triton-src"
           git clone https://github.com/JonathanSalwan/Triton "_deps/triton-src"
           cd "_deps/triton-src"
-          # Prefer tag v0.9; if it doesn't exist, this will fail and you can pin a commit instead.
+
+          # Prefer v0.9 tag; if it doesn't exist in upstream, pin to the commit you want.
           git checkout "v0.9"
           git rev-parse HEAD
+
+      - name: Configure Triton (MSVC only; no clang/cl mixing)
+        shell: bash -l {0}
+        run: |
+          set -euo pipefail
+          cmake -S "_deps/triton-src" -B "_deps/triton-build" \
+            -G "Visual Studio 17 2022" -A x64 \
+            -DCMAKE_INSTALL_PREFIX="${TRITON_INSTALL_DIR}" \
+            -DLLVM_DIR="${LLVM_DIR}" \
+            -DCMAKE_C_COMPILER=cl \
+            -DCMAKE_CXX_COMPILER=cl
 
       - name: Build & install Triton
         shell: bash -l {0}
         run: |
           set -euo pipefail
-          cmake -S "_deps/triton-src" -B "_deps/triton-build" \
-            -G "Ninja" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="${TRITON_INSTALL_DIR}" \
-            -DLLVM_DIR="${LLVM_DIR}"
-
           cmake --build "_deps/triton-build" --config Release --parallel
           cmake --install "_deps/triton-build" --config Release
 
@@ -114,20 +115,22 @@ jobs:
           set -euo pipefail
           CONAN_GEN="${BUILD_DIR}/conan/build/generators"
 
+          # Ensure CMake can find conda-provided ZLIB/LibXml2 so LLVM exports resolve ZLIB::ZLIB etc.
           cmake -S . -B "${BUILD_DIR}" \
-            -G "Ninja" \
-            -DCMAKE_BUILD_TYPE=Release \
+            -G "Visual Studio 17 2022" -A x64 \
             -DCMAKE_TOOLCHAIN_FILE="${CONAN_GEN}/conan_toolchain.cmake" \
             -DCMAKE_PREFIX_PATH="${CONAN_GEN};${CONDA_PREFIX}/Library;${TRITON_INSTALL_DIR}" \
             -DLLVM_DIR="${LLVM_DIR}" \
             -Dtriton_DIR="${TRITON_INSTALL_DIR}/lib/cmake/triton" \
-            -DTITAN_BUILD_INTRINSICS=OFF
+            -DTITAN_BUILD_INTRINSICS=OFF \
+            -DCMAKE_C_COMPILER=cl \
+            -DCMAKE_CXX_COMPILER=cl
 
-      - name: Build titan.exe
+      - name: Build titan.exe (Release)
         shell: bash -l {0}
         run: |
           set -euo pipefail
-          cmake --build "${BUILD_DIR}" --config Release --parallel
+          cmake --build "${BUILD_DIR}" --config Release --target titan --parallel
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
