@@ -13,6 +13,8 @@ jobs:
       BUILD_DIR: build
       TRITON_SRC_DIR: ${{ github.workspace }}\_deps\triton-src
       TRITON_DEPS_DIR: ${{ github.workspace }}\_deps\triton-deps
+      # Pin Z3 version for Triton build (must be >= 4.6.0)
+      Z3_VERSION: "4.12.2"
 
     steps:
       - name: Checkout (with submodules)
@@ -32,21 +34,26 @@ jobs:
           channels: conda-forge
           channel-priority: strict
 
-      - name: Install LLVM 15 dev (conda-forge llvmdev) + deps
+      - name: Install LLVM 15 dev (conda-forge llvmdev) + ZLIB/LibXml2
         shell: bash -l {0}
         run: |
           set -euo pipefail
           conda info
+          # Keep LLVM/headers/libs in conda; compile with MSVC cl.exe (not conda clang)
           conda install -y "llvmdev=15.*" "lld=15.*" zlib libxml2 cmake ninja
+
           echo "CONDA_PREFIX=$CONDA_PREFIX"
           test -n "${CONDA_PREFIX:-}"
+
+          # Ensure conda DLLs are discoverable at runtime/link time
           echo "$CONDA_PREFIX/Library/bin" >> "$GITHUB_PATH"
 
+          # Export LLVM_DIR for find_package(LLVM CONFIG)
           LLVM_DIR="$CONDA_PREFIX/Library/lib/cmake/llvm"
           test -d "$LLVM_DIR"
           echo "LLVM_DIR=$LLVM_DIR" >> "$GITHUB_ENV"
 
-      - name: Set TRITON_INSTALL_DIR
+      - name: Set TRITON_INSTALL_DIR (avoid runner.temp expression issues)
         shell: pwsh
         run: |
           "TRITON_INSTALL_DIR=$env:RUNNER_TEMP\triton-install" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -64,21 +71,51 @@ jobs:
           pip install "conan>=2.0,<3.0"
           conan profile detect --force
 
-      - name: Install Triton deps with Conan (Z3) + VirtualBuildEnv
+      - name: Install Triton deps with Conan (Z3) + CMakeDeps
         shell: pwsh
         run: |
-          # TODO: align z3 version with your titan conanfile
-          conan install --requires="z3/4.12.2" `
+          # Triton uses a custom FindZ3.cmake expecting Z3_INCLUDE_DIR and Z3_LIBRARY.
+          # We'll install Z3 via Conan and then extract explicit paths from Conan CMakeDeps outputs.
+          if (Test-Path "${{ env.TRITON_DEPS_DIR }}") { Remove-Item -Recurse -Force "${{ env.TRITON_DEPS_DIR }}" }
+
+          conan install --requires="z3/${{ env.Z3_VERSION }}" `
             -of "${{ env.TRITON_DEPS_DIR }}" `
             -s build_type=Release `
+            -g CMakeDeps `
             -g VirtualBuildEnv `
-            -g VirtualRunEnv `
             -b missing
 
-          $bat = Get-ChildItem -Path "${{ env.TRITON_DEPS_DIR }}" -Recurse -Filter "conanbuild.bat" | Select-Object -First 1
-          if (-not $bat) { throw "conanbuild.bat not found for Triton deps" }
-          "TRITON_CONANBUILD_BAT=$($bat.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "TRITON_CONANBUILD_BAT=$($bat.FullName)"
+      - name: Extract Z3 paths for Triton (from Conan CMakeDeps)
+        shell: pwsh
+        run: |
+          $gen = Join-Path "${{ env.TRITON_DEPS_DIR }}" "build\generators"
+          if (!(Test-Path $gen)) { throw "Conan generators dir not found: $gen" }
+
+          $cfg = Get-ChildItem -Path $gen -Recurse -File -Filter "*Z3*config.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $cfg) { $cfg = Get-ChildItem -Path $gen -Recurse -File -Filter "*z3*config.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1 }
+          if (-not $cfg) { throw "Z3 config cmake not found under $gen" }
+
+          $txt = Get-Content $cfg.FullName -Raw
+
+          # Conan CMakeDeps commonly emits these variables in *-config.cmake
+          $inc = [regex]::Match($txt, 'set\(\s*Z3_INCLUDE_DIRS\s+"([^"]+)"').Groups[1].Value
+          $lib = [regex]::Match($txt, 'set\(\s*Z3_LIBRARIES\s+"([^"]+)"').Groups[1].Value
+
+          if (-not $inc) { $inc = [regex]::Match($txt, 'set\(\s*Z3_INCLUDE_DIR\s+"([^"]+)"').Groups[1].Value }
+          if (-not $lib) { $lib = [regex]::Match($txt, 'set\(\s*Z3_LIBRARY\s+"([^"]+)"').Groups[1].Value }
+
+          if (-not $inc -or -not $lib) {
+            Write-Host "Z3 config file used: $($cfg.FullName)"
+            throw "Failed to parse Z3 include/library from config"
+          }
+
+          if (!(Test-Path $inc)) { throw "Z3 include dir does not exist: $inc" }
+          if (!(Test-Path $lib)) { throw "Z3 library does not exist: $lib" }
+
+          "Z3_INCLUDE_DIR=$inc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "Z3_LIBRARY=$lib"     | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Z3_INCLUDE_DIR=$inc"
+          Write-Host "Z3_LIBRARY=$lib"
 
       - name: Conan install deps for titan (fmt/range-v3/z3/capstone)
         shell: pwsh
@@ -96,31 +133,37 @@ jobs:
         run: |
           if (Test-Path "${{ env.TRITON_SRC_DIR }}") { Remove-Item -Recurse -Force "${{ env.TRITON_SRC_DIR }}" }
           git clone https://github.com/JonathanSalwan/Triton "${{ env.TRITON_SRC_DIR }}"
+
+          # Prefer tag v0.9; if this fails in your logs, pin a commit instead.
           git -C "${{ env.TRITON_SRC_DIR }}" checkout v0.9
           git -C "${{ env.TRITON_SRC_DIR }}" rev-parse HEAD
 
-      - name: Configure Triton (MSVC only, with Z3 from Conan env)
+      - name: Configure Triton (MSVC only; explicit Z3 paths; no clang/cl mixing)
         shell: pwsh
         run: |
           $src = "${{ env.TRITON_SRC_DIR }}"
           $bld = "_deps\triton-build"
           $inst = "$env:TRITON_INSTALL_DIR"
           $llvm = "$env:LLVM_DIR"
-          $conanbat = "$env:TRITON_CONANBUILD_BAT"
 
-          cmd /c "call `"$conanbat`" && cmake -S `"$src`" -B `"$bld`" -G `"Visual Studio 17 2022`" -A x64 -DCMAKE_INSTALL_PREFIX=`"$inst`" -DLLVM_DIR=`"$llvm`" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl"
+          cmd /c "cmake -S `"$src`" -B `"$bld`" -G `"Visual Studio 17 2022`" -A x64 -DCMAKE_INSTALL_PREFIX=`"$inst`" -DLLVM_DIR=`"$llvm`" -DZ3_INCLUDE_DIR=`"$env:Z3_INCLUDE_DIR`" -DZ3_LIBRARY=`"$env:Z3_LIBRARY`" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl"
 
       - name: Build & install Triton
         shell: pwsh
         run: |
-          $conanbat = "$env:TRITON_CONANBUILD_BAT"
-          cmd /c "call `"$conanbat`" && cmake --build `_deps\triton-build` --config Release --parallel && cmake --install `_deps\triton-build` --config Release"
+          cmake --build "_deps\triton-build" --config Release --parallel
+          cmake --install "_deps\triton-build" --config Release
 
       - name: Configure titan (CMake)
         shell: pwsh
         run: |
           $conanGen = Resolve-Path "$env:BUILD_DIR\conan\build\generators"
           $toolchain = Join-Path $conanGen "conan_toolchain.cmake"
+
+          # Make sure CMake can find:
+          # - Conan packages (fmt/range-v3/...)
+          # - conda ZLIB/LibXml2 (needed by conda LLVM exports)
+          # - Triton install prefix
           $prefixPath = "$($conanGen.Path);$env:CONDA_PREFIX\Library;$env:TRITON_INSTALL_DIR"
 
           cmake -S . -B "$env:BUILD_DIR" -G "Visual Studio 17 2022" -A x64 `
@@ -135,3 +178,11 @@ jobs:
         shell: pwsh
         run: |
           cmake --build "$env:BUILD_DIR" --config Release --target titan --parallel
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: titan-windows-release
+          path: |
+            build/titan.exe
+            build/Release/titan.exe
