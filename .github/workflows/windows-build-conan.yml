@@ -39,16 +39,13 @@ jobs:
         run: |
           set -euo pipefail
           conda info
-          # Keep LLVM/headers/libs in conda; compile with MSVC cl.exe (not conda clang)
           conda install -y "llvmdev=15.*" "lld=15.*" zlib libxml2 cmake ninja
 
           echo "CONDA_PREFIX=$CONDA_PREFIX"
           test -n "${CONDA_PREFIX:-}"
 
-          # Ensure conda DLLs are discoverable at runtime/link time
           echo "$CONDA_PREFIX/Library/bin" >> "$GITHUB_PATH"
 
-          # Export LLVM_DIR for find_package(LLVM CONFIG)
           LLVM_DIR="$CONDA_PREFIX/Library/lib/cmake/llvm"
           test -d "$LLVM_DIR"
           echo "LLVM_DIR=$LLVM_DIR" >> "$GITHUB_ENV"
@@ -74,8 +71,6 @@ jobs:
       - name: Install Triton deps with Conan (Z3) + CMakeDeps
         shell: pwsh
         run: |
-          # Triton uses a custom FindZ3.cmake expecting Z3_INCLUDE_DIR and Z3_LIBRARY.
-          # We'll install Z3 via Conan and then extract explicit paths from Conan CMakeDeps outputs.
           if (Test-Path "${{ env.TRITON_DEPS_DIR }}") { Remove-Item -Recurse -Force "${{ env.TRITON_DEPS_DIR }}" }
 
           conan install --requires="z3/${{ env.Z3_VERSION }}" `
@@ -85,36 +80,32 @@ jobs:
             -g VirtualBuildEnv `
             -b missing
 
-          Write-Host "Listing Conan output folder:"
+          Write-Host "Top-level listing of TRITON_DEPS_DIR:"
           Get-ChildItem -Force -Path "${{ env.TRITON_DEPS_DIR }}" | Select-Object FullName
 
-      - name: Extract Z3 paths for Triton (from Conan CMakeDeps)
+          Write-Host "Second-level listing of TRITON_DEPS_DIR:"
+          Get-ChildItem -Force -Path "${{ env.TRITON_DEPS_DIR }}" -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object FullName | Select-Object -First 200
+
+      - name: Extract Z3 paths for Triton (search recursively; no path assumptions)
         shell: pwsh
         run: |
           $root = Resolve-Path "${{ env.TRITON_DEPS_DIR }}"
 
-          # Conan2 usually writes generators to <output-folder>/generators
-          $candidates = @(
-            (Join-Path $root "generators"),
-            (Join-Path $root "build\generators")
-          ) | Where-Object { Test-Path $_ }
+          # Find any Z3 config files produced by Conan CMakeDeps (names vary by recipe)
+          $cfg = Get-ChildItem -Path $root -Recurse -File -Include "*z3*config.cmake","*Z3*config.cmake","*Z3*Config.cmake","*z3*Config.cmake" -ErrorAction SilentlyContinue |
+                 Select-Object -First 1
 
-          if ($candidates.Count -eq 0) {
-            Write-Host "Directory listing of TRITON_DEPS_DIR:"
-            Get-ChildItem -Force -Path $root | Select-Object FullName
-            throw "No Conan generators directory found under $root"
+          if (-not $cfg) {
+            Write-Host "No z3 config cmake found under: $root"
+            Write-Host "Showing first 400 files under TRITON_DEPS_DIR to debug:"
+            Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue | Select-Object FullName | Select-Object -First 400
+            throw "Z3 config cmake not found; Conan CMakeDeps output not located"
           }
 
-          $gen = $candidates[0]
-          Write-Host "Using Conan generators dir: $gen"
-
-          # Find a Z3 config file produced by CMakeDeps
-          $cfg = Get-ChildItem -Path $gen -Recurse -File -Include "*Z3*config.cmake","*z3*config.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $cfg) { throw "Z3 config cmake not found under $gen" }
-
+          Write-Host "Using Z3 config: $($cfg.FullName)"
           $txt = Get-Content $cfg.FullName -Raw
 
-          # Conan CMakeDeps commonly emits these variables in *-config.cmake
+          # Conan CMakeDeps commonly emits these variables
           $inc = [regex]::Match($txt, 'set\(\s*Z3_INCLUDE_DIRS\s+"([^"]+)"').Groups[1].Value
           $lib = [regex]::Match($txt, 'set\(\s*Z3_LIBRARIES\s+"([^"]+)"').Groups[1].Value
 
@@ -122,8 +113,7 @@ jobs:
           if (-not $lib) { $lib = [regex]::Match($txt, 'set\(\s*Z3_LIBRARY\s+"([^"]+)"').Groups[1].Value }
 
           if (-not $inc -or -not $lib) {
-            Write-Host "Z3 config file used: $($cfg.FullName)"
-            throw "Failed to parse Z3 include/library from config"
+            throw "Failed to parse Z3_INCLUDE_DIR(S)/Z3_LIBRARY(IES) from $($cfg.FullName)"
           }
 
           if (!(Test-Path $inc)) { throw "Z3 include dir does not exist: $inc" }
@@ -150,8 +140,6 @@ jobs:
         run: |
           if (Test-Path "${{ env.TRITON_SRC_DIR }}") { Remove-Item -Recurse -Force "${{ env.TRITON_SRC_DIR }}" }
           git clone https://github.com/JonathanSalwan/Triton "${{ env.TRITON_SRC_DIR }}"
-
-          # Prefer tag v0.9; if this fails in your logs, pin a commit instead.
           git -C "${{ env.TRITON_SRC_DIR }}" checkout v0.9
           git -C "${{ env.TRITON_SRC_DIR }}" rev-parse HEAD
 
@@ -177,10 +165,6 @@ jobs:
           $conanGen = Resolve-Path "$env:BUILD_DIR\conan\build\generators"
           $toolchain = Join-Path $conanGen "conan_toolchain.cmake"
 
-          # Make sure CMake can find:
-          # - Conan packages (fmt/range-v3/...)
-          # - conda ZLIB/LibXml2 (needed by conda LLVM exports)
-          # - Triton install prefix
           $prefixPath = "$($conanGen.Path);$env:CONDA_PREFIX\Library;$env:TRITON_INSTALL_DIR"
 
           cmake -S . -B "$env:BUILD_DIR" -G "Visual Studio 17 2022" -A x64 `
