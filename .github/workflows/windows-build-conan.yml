@@ -81,19 +81,18 @@ jobs:
           if (-not $pkgRoot) { throw "conan cache path returned empty for $ref" }
           if (!(Test-Path $pkgRoot)) { throw "Conan cache path does not exist: $pkgRoot" }
 
-          # Common layout for conan-center z3 package
           $inc = Join-Path $pkgRoot "include"
           $libDir = Join-Path $pkgRoot "lib"
 
           if (!(Test-Path (Join-Path $inc "z3.h"))) {
             Write-Host "Package root: $pkgRoot"
-            Write-Host "Listing root:"
+            Write-Host "Listing package root:"
             Get-ChildItem -Force -Path $pkgRoot | Select-Object FullName
             throw "Expected z3.h not found under $inc"
           }
 
           if (!(Test-Path $libDir)) {
-            Write-Host "Listing root:"
+            Write-Host "Listing package root:"
             Get-ChildItem -Force -Path $pkgRoot | Select-Object FullName
             throw "Expected lib dir not found: $libDir"
           }
@@ -103,7 +102,7 @@ jobs:
                  Select-Object -First 1
 
           if (-not $lib) {
-            Write-Host "Listing $libDir:"
+            Write-Host ("Listing {0}:" -f $libDir)
             Get-ChildItem -Force -Path $libDir | Select-Object FullName
             throw "No z3-related .lib found under $libDir"
           }
