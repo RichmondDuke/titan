@@ -90,10 +90,10 @@ jobs:
             foreach ($prop in $j.graph.nodes.PSObject.Properties) {
               $node = $prop.Value
               if ($node -and $node.ref -and ($node.ref -like "$prefix*")) {
-                if ($node.package_folder)                         { return $node.package_folder }
-                if ($node.packageFolder)                          { return $node.packageFolder }
+                if ($node.package_folder)                            { return $node.package_folder }
+                if ($node.packageFolder)                             { return $node.packageFolder }
                 if ($node.folders -and $node.folders.package_folder) { return $node.folders.package_folder }
-                if ($node.folders -and $node.folders.package)    { return $node.folders.package }
+                if ($node.folders -and $node.folders.package)        { return $node.folders.package }
               }
             }
             return $null
@@ -166,24 +166,29 @@ jobs:
           Write-Host ("Z3_LIBRARY={0}" -f $z3Lib.FullName)
 
           # ---- Capstone ----
+          # 注意：capstone 5.x 把头文件放在 include/capstone/ 子目录下
+          # 但 Triton v0.9 用 #include <capstone.h>（不带子目录）
+          # 所以把 include/capstone/ 作为包含目录传给 Triton，而不是 include/
           $capFolder = Get-PackageFolder "capstone/"
           if (-not $capFolder) { throw "Failed to resolve capstone package folder from Conan JSON" }
 
-          $capInc = Join-Path $capFolder "include"
+          $capIncRoot = Join-Path $capFolder "include"
+          $capIncTriton = Join-Path $capIncRoot "capstone"   # ← 关键修复
           $capLibDir = Join-Path $capFolder "lib"
 
-          $capHdr = Join-Path $capInc "capstone\capstone.h"
-          if (!(Test-Path $capHdr)) { throw "capstone.h not found under $capInc" }
+          if (!(Test-Path (Join-Path $capIncTriton "capstone.h"))) {
+            throw "capstone.h not found under $capIncTriton"
+          }
 
           $capLib = Get-ChildItem -Path $capLibDir -Filter "*.lib" -File -ErrorAction SilentlyContinue |
                     Where-Object { $_.Name -match 'capstone|cs' } |
                     Select-Object -First 1
           if (-not $capLib) { throw "No capstone .lib found under $capLibDir" }
 
-          "CAPSTONE_INCLUDE_DIR=$capInc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CAPSTONE_INCLUDE_DIR=$capIncTriton" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CAPSTONE_LIBRARY=$($capLib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          Write-Host ("CAPSTONE_INCLUDE_DIR={0}" -f $capInc)
+          Write-Host ("CAPSTONE_INCLUDE_DIR={0}" -f $capIncTriton)
           Write-Host ("CAPSTONE_LIBRARY={0}" -f $capLib.FullName)
 
       - name: Clone Triton source
@@ -210,6 +215,7 @@ jobs:
             -DCAPSTONE_LIBRARY="$env:CAPSTONE_LIBRARY" `
             -DBOOST_ROOT="$env:BOOST_ROOT" `
             -DBoost_NO_SYSTEM_PATHS=ON `
+            -DWITH_PYTHON_BINDINGS=OFF `
             -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
 
       - name: Build & install Triton
