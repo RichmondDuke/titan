@@ -12,7 +12,6 @@ jobs:
     env:
       BUILD_DIR: build
       TRITON_SRC_DIR: ${{ github.workspace }}\_deps\triton-src
-      TRITON_DEPS_DIR: ${{ github.workspace }}\_deps\triton-deps
       Z3_VERSION: "4.12.2"
 
     steps:
@@ -33,22 +32,24 @@ jobs:
           channels: conda-forge
           channel-priority: strict
 
-      - name: Install LLVM 15 dev (conda-forge llvmdev) + ZLIB/LibXml2
-        shell: bash -l {0}
-        run: |
-          set -euo pipefail
-          conda info
-          conda install -y "llvmdev=15.*" "lld=15.*" zlib libxml2 cmake ninja
-          echo "$CONDA_PREFIX/Library/bin" >> "$GITHUB_PATH"
-          LLVM_DIR="$CONDA_PREFIX/Library/lib/cmake/llvm"
-          test -d "$LLVM_DIR"
-          echo "LLVM_DIR=$LLVM_DIR" >> "$GITHUB_ENV"
-
       - name: Set TRITON_INSTALL_DIR
         shell: pwsh
         run: |
           "TRITON_INSTALL_DIR=$env:RUNNER_TEMP\triton-install" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "TRITON_INSTALL_DIR=$env:RUNNER_TEMP\triton-install"
+
+      - name: Install LLVM 15 dev (conda-forge llvmdev) + deps
+        shell: bash -l {0}
+        run: |
+          set -euo pipefail
+          conda info
+          # Do NOT install conda clang here; we compile with MSVC cl.exe to avoid clang/cl mixing
+          conda install -y "llvmdev=15.*" "lld=15.*" zlib libxml2 cmake ninja
+          echo "$CONDA_PREFIX/Library/bin" >> "$GITHUB_PATH"
+
+          LLVM_DIR="$CONDA_PREFIX/Library/lib/cmake/llvm"
+          test -d "$LLVM_DIR"
+          echo "LLVM_DIR=$LLVM_DIR" >> "$GITHUB_ENV"
 
       - name: Setup Python (for Conan)
         uses: actions/setup-python@v5
@@ -62,57 +63,6 @@ jobs:
           pip install "conan>=2.0,<3.0"
           conan profile detect --force
 
-      - name: Conan install Z3 for Triton
-        shell: pwsh
-        run: |
-          if (Test-Path "${{ env.TRITON_DEPS_DIR }}") { Remove-Item -Recurse -Force "${{ env.TRITON_DEPS_DIR }}" }
-
-          conan install --requires="z3/${{ env.Z3_VERSION }}" `
-            -of "${{ env.TRITON_DEPS_DIR }}" `
-            -s build_type=Release `
-            -b missing
-
-      - name: Resolve Z3 include/lib paths from Conan cache
-        shell: pwsh
-        run: |
-          $ref = "z3/${{ env.Z3_VERSION }}"
-          $pkgRoot = (conan cache path $ref).Trim()
-
-          if (-not $pkgRoot) { throw "conan cache path returned empty for $ref" }
-          if (!(Test-Path $pkgRoot)) { throw "Conan cache path does not exist: $pkgRoot" }
-
-          $inc = Join-Path $pkgRoot "include"
-          $libDir = Join-Path $pkgRoot "lib"
-
-          if (!(Test-Path (Join-Path $inc "z3.h"))) {
-            Write-Host "Package root: $pkgRoot"
-            Write-Host "Listing package root:"
-            Get-ChildItem -Force -Path $pkgRoot | Select-Object FullName
-            throw "Expected z3.h not found under $inc"
-          }
-
-          if (!(Test-Path $libDir)) {
-            Write-Host "Listing package root:"
-            Get-ChildItem -Force -Path $pkgRoot | Select-Object FullName
-            throw "Expected lib dir not found: $libDir"
-          }
-
-          $lib = Get-ChildItem -Path $libDir -Filter "*.lib" -File -ErrorAction SilentlyContinue |
-                 Where-Object { $_.Name -match 'z3' } |
-                 Select-Object -First 1
-
-          if (-not $lib) {
-            Write-Host ("Listing {0}:" -f $libDir)
-            Get-ChildItem -Force -Path $libDir | Select-Object FullName
-            throw "No z3-related .lib found under $libDir"
-          }
-
-          "Z3_INCLUDE_DIR=$inc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "Z3_LIBRARY=$($lib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-          Write-Host "Z3_INCLUDE_DIR=$inc"
-          Write-Host "Z3_LIBRARY=$($lib.FullName)"
-
       - name: Conan install deps for titan (fmt/range-v3/z3/capstone)
         shell: pwsh
         run: |
@@ -124,29 +74,77 @@ jobs:
             -g CMakeToolchain `
             -b missing
 
+      - name: Install Z3 for Triton via Conan and locate headers/libs in cache
+        shell: pwsh
+        run: |
+          $ref = "z3/${{ env.Z3_VERSION }}"
+
+          # Install Z3 (puts binaries in Conan cache)
+          conan install --requires="$ref" -s build_type=Release -b missing
+
+          # Get some cache root for this ref, then search below it for real artifacts.
+          $root = (conan cache path $ref).Trim()
+          if (-not $root) { throw "conan cache path returned empty for $ref" }
+          if (!(Test-Path $root)) { throw "conan cache path does not exist: $root" }
+
+          Write-Host "Conan cache root for $ref: $root"
+
+          # Find z3.h in the subtree (Conan cache layout differs between export/package/build folders)
+          $hdr = Get-ChildItem -Path $root -Recurse -File -Filter "z3.h" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $hdr) {
+            Write-Host "Could not find z3.h under cache root. Showing first 200 files:"
+            Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue | Select-Object FullName | Select-Object -First 200
+            throw "z3.h not found under Conan cache root for $ref"
+          }
+          $inc = $hdr.Directory.FullName
+          Write-Host "Found z3.h: $($hdr.FullName)"
+          Write-Host "Z3 include dir: $inc"
+
+          # Find z3 .lib under subtree
+          $lib = Get-ChildItem -Path $root -Recurse -File -Filter "*.lib" -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Name -match 'z3' } |
+                 Select-Object -First 1
+          if (-not $lib) {
+            Write-Host "Could not find any z3*.lib under cache root. Showing first 200 libs:"
+            Get-ChildItem -Path $root -Recurse -File -Filter "*.lib" -ErrorAction SilentlyContinue | Select-Object FullName | Select-Object -First 200
+            throw "z3 .lib not found under Conan cache root for $ref"
+          }
+          Write-Host "Z3 library: $($lib.FullName)"
+
+          "Z3_INCLUDE_DIR=$inc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "Z3_LIBRARY=$($lib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Clone Triton source
         shell: pwsh
         run: |
-          if (Test-Path "${{ env.TRITON_SRC_DIR }}") { Remove-Item -Recurse -Force "${{ env.TRITON_SRC_DIR }}" }
-          git clone https://github.com/JonathanSalwan/Triton "${{ env.TRITON_SRC_DIR }}"
-          git -C "${{ env.TRITON_SRC_DIR }}" checkout v0.9
-          git -C "${{ env.TRITON_SRC_DIR }}" rev-parse HEAD
+          if (Test-Path "_deps\triton-src") { Remove-Item -Recurse -Force "_deps\triton-src" }
+          git clone https://github.com/JonathanSalwan/Triton "_deps\triton-src"
+          git -C "_deps\triton-src" checkout "v0.9"
+          git -C "_deps\triton-src" rev-parse HEAD
 
-      - name: Configure Triton (MSVC only; explicit Z3 paths)
+      - name: Configure Triton (MSVC; explicit Z3; LLVM from conda)
         shell: pwsh
         run: |
-          $src = "${{ env.TRITON_SRC_DIR }}"
+          $src = "_deps\triton-src"
           $bld = "_deps\triton-build"
           $inst = "$env:TRITON_INSTALL_DIR"
-          $llvm = "$env:LLVM_DIR"
 
-          cmd /c "cmake -S `"$src`" -B `"$bld`" -G `"Visual Studio 17 2022`" -A x64 -DCMAKE_INSTALL_PREFIX=`"$inst`" -DLLVM_DIR=`"$llvm`" -DZ3_INCLUDE_DIR=`"$env:Z3_INCLUDE_DIR`" -DZ3_LIBRARY=`"$env:Z3_LIBRARY`" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl"
+          cmake -S $src -B $bld -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_INSTALL_PREFIX="$inst" `
+            -DLLVM_DIR="$env:LLVM_DIR" `
+            -DZ3_INCLUDE_DIR="$env:Z3_INCLUDE_DIR" `
+            -DZ3_LIBRARY="$env:Z3_LIBRARY" `
+            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
 
       - name: Build & install Triton
         shell: pwsh
         run: |
           cmake --build "_deps\triton-build" --config Release --parallel
           cmake --install "_deps\triton-build" --config Release
+
+          if (!(Test-Path "$env:TRITON_INSTALL_DIR\lib\cmake\triton\tritonConfig.cmake")) {
+            throw "tritonConfig.cmake not found after install"
+          }
 
       - name: Configure titan (CMake)
         shell: pwsh
