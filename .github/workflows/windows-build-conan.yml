@@ -63,16 +63,52 @@ jobs:
           pip install "conan>=2.0,<3.0"
           conan profile detect --force
 
-      - name: Conan install deps for titan (fmt/range-v3/z3/capstone)
+      - name: Conan install deps for titan (fmt/range-v3/z3/capstone/boost)
         shell: pwsh
         run: |
+          $jsonPath = Join-Path $env:RUNNER_TEMP "conan-titan-deps.json"
+
           conan install . `
             -of "$env:BUILD_DIR\conan" `
             -s build_type=Release `
             -s compiler.cppstd=20 `
             -g CMakeDeps `
             -g CMakeToolchain `
-            -b missing
+            -b missing `
+            --format=json | Out-File -FilePath $jsonPath -Encoding utf8
+
+          # 解析 boost package folder，供 Triton configure 时使用
+          $j = Get-Content $jsonPath -Raw | ConvertFrom-Json
+          if (-not $j.graph -or -not $j.graph.nodes) {
+            Write-Host "Conan JSON missing graph.nodes, first 2000 chars:"
+            $raw = Get-Content $jsonPath -Raw
+            Write-Host $raw.Substring(0, [Math]::Min(2000, $raw.Length))
+            throw "Unexpected Conan JSON: missing graph.nodes"
+          }
+
+          function Get-PkgFolder([string]$prefix) {
+            foreach ($prop in $j.graph.nodes.PSObject.Properties) {
+              $node = $prop.Value
+              if ($node -and $node.ref -and ($node.ref -like "$prefix*")) {
+                if ($node.package_folder)                         { return $node.package_folder }
+                if ($node.packageFolder)                          { return $node.packageFolder }
+                if ($node.folders -and $node.folders.package_folder) { return $node.folders.package_folder }
+                if ($node.folders -and $node.folders.package)    { return $node.folders.package }
+              }
+            }
+            return $null
+          }
+
+          $boostFolder = Get-PkgFolder "boost/"
+          if (-not $boostFolder) { throw "Failed to resolve boost package folder from Conan JSON" }
+
+          $boostInc = Join-Path $boostFolder "include"
+          if (!(Test-Path (Join-Path $boostInc "boost\version.hpp"))) {
+            throw "boost/version.hpp not found under $boostInc"
+          }
+
+          "BOOST_ROOT=$boostFolder" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "BOOST_ROOT=$boostFolder"
 
       - name: Install Triton deps (Z3 + Capstone) and export include/lib paths (Conan JSON)
         shell: pwsh
@@ -172,6 +208,8 @@ jobs:
             -DZ3_LIBRARY="$env:Z3_LIBRARY" `
             -DCAPSTONE_INCLUDE_DIR="$env:CAPSTONE_INCLUDE_DIR" `
             -DCAPSTONE_LIBRARY="$env:CAPSTONE_LIBRARY" `
+            -DBOOST_ROOT="$env:BOOST_ROOT" `
+            -DBoost_NO_SYSTEM_PATHS=ON `
             -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
 
       - name: Build & install Triton
@@ -199,9 +237,6 @@ jobs:
             -DCMAKE_PREFIX_PATH="$prefixPath" `
             -DLLVM_DIR="$env:LLVM_DIR" `
             -Dtriton_DIR="$env:TRITON_INSTALL_DIR\lib\cmake\triton" `
-            -DBOOST_ROOT="$conanGen" `
-            -DBoost_NO_SYSTEM_PATHS=ON `
-            -DBOOST_NO_BOOST_CMAKE=OFF `
             -DTITAN_BUILD_INTRINSICS=OFF `
             -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
 
