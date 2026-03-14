@@ -43,10 +43,8 @@ jobs:
         run: |
           set -euo pipefail
           conda info
-          # Do NOT install conda clang here; we compile with MSVC cl.exe to avoid clang/cl mixing
           conda install -y "llvmdev=15.*" "lld=15.*" zlib libxml2 cmake ninja
           echo "$CONDA_PREFIX/Library/bin" >> "$GITHUB_PATH"
-
           LLVM_DIR="$CONDA_PREFIX/Library/lib/cmake/llvm"
           test -d "$LLVM_DIR"
           echo "LLVM_DIR=$LLVM_DIR" >> "$GITHUB_ENV"
@@ -79,17 +77,14 @@ jobs:
         run: |
           $ref = "z3/${{ env.Z3_VERSION }}"
 
-          # Install Z3 (puts binaries in Conan cache)
           conan install --requires="$ref" -s build_type=Release -b missing
 
-          # Get some cache root for this ref, then search below it for real artifacts.
           $root = (conan cache path $ref).Trim()
           if (-not $root) { throw "conan cache path returned empty for $ref" }
           if (!(Test-Path $root)) { throw "conan cache path does not exist: $root" }
 
-          Write-Host "Conan cache root for $ref: $root"
+          Write-Host ("Conan cache root for {0}: {1}" -f $ref, $root)
 
-          # Find z3.h in the subtree (Conan cache layout differs between export/package/build folders)
           $hdr = Get-ChildItem -Path $root -Recurse -File -Filter "z3.h" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $hdr) {
             Write-Host "Could not find z3.h under cache root. Showing first 200 files:"
@@ -97,10 +92,9 @@ jobs:
             throw "z3.h not found under Conan cache root for $ref"
           }
           $inc = $hdr.Directory.FullName
-          Write-Host "Found z3.h: $($hdr.FullName)"
-          Write-Host "Z3 include dir: $inc"
+          Write-Host ("Found z3.h: {0}" -f $hdr.FullName)
+          Write-Host ("Z3 include dir: {0}" -f $inc)
 
-          # Find z3 .lib under subtree
           $lib = Get-ChildItem -Path $root -Recurse -File -Filter "*.lib" -ErrorAction SilentlyContinue |
                  Where-Object { $_.Name -match 'z3' } |
                  Select-Object -First 1
@@ -109,7 +103,8 @@ jobs:
             Get-ChildItem -Path $root -Recurse -File -Filter "*.lib" -ErrorAction SilentlyContinue | Select-Object FullName | Select-Object -First 200
             throw "z3 .lib not found under Conan cache root for $ref"
           }
-          Write-Host "Z3 library: $($lib.FullName)"
+
+          Write-Host ("Z3 library: {0}" -f $lib.FullName)
 
           "Z3_INCLUDE_DIR=$inc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "Z3_LIBRARY=$($lib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -141,7 +136,6 @@ jobs:
         run: |
           cmake --build "_deps\triton-build" --config Release --parallel
           cmake --install "_deps\triton-build" --config Release
-
           if (!(Test-Path "$env:TRITON_INSTALL_DIR\lib\cmake\triton\tritonConfig.cmake")) {
             throw "tritonConfig.cmake not found after install"
           }
