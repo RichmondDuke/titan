@@ -85,14 +85,31 @@ jobs:
             -g VirtualBuildEnv `
             -b missing
 
+          Write-Host "Listing Conan output folder:"
+          Get-ChildItem -Force -Path "${{ env.TRITON_DEPS_DIR }}" | Select-Object FullName
+
       - name: Extract Z3 paths for Triton (from Conan CMakeDeps)
         shell: pwsh
         run: |
-          $gen = Join-Path "${{ env.TRITON_DEPS_DIR }}" "build\generators"
-          if (!(Test-Path $gen)) { throw "Conan generators dir not found: $gen" }
+          $root = Resolve-Path "${{ env.TRITON_DEPS_DIR }}"
 
-          $cfg = Get-ChildItem -Path $gen -Recurse -File -Filter "*Z3*config.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $cfg) { $cfg = Get-ChildItem -Path $gen -Recurse -File -Filter "*z3*config.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1 }
+          # Conan2 usually writes generators to <output-folder>/generators
+          $candidates = @(
+            (Join-Path $root "generators"),
+            (Join-Path $root "build\generators")
+          ) | Where-Object { Test-Path $_ }
+
+          if ($candidates.Count -eq 0) {
+            Write-Host "Directory listing of TRITON_DEPS_DIR:"
+            Get-ChildItem -Force -Path $root | Select-Object FullName
+            throw "No Conan generators directory found under $root"
+          }
+
+          $gen = $candidates[0]
+          Write-Host "Using Conan generators dir: $gen"
+
+          # Find a Z3 config file produced by CMakeDeps
+          $cfg = Get-ChildItem -Path $gen -Recurse -File -Include "*Z3*config.cmake","*z3*config.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $cfg) { throw "Z3 config cmake not found under $gen" }
 
           $txt = Get-Content $cfg.FullName -Raw
