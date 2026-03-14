@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.15)
-
 project(titan)
+
+# Suppress CMP0167 warning: FindBoost removed in CMake 4.x
+if(POLICY CMP0167)
+  cmake_policy(SET CMP0167 OLD)
+endif()
+# ... rest of file unchanged
 
 option(TITAN_BUILD_INTRINSICS "Build intrinsics targets (may not work on MSVC/Windows)" ON)
 
