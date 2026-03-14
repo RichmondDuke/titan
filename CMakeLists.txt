@@ -27,10 +27,25 @@ endif()
 
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_20)
 
+# LLVM link (components -> libraries)
+# This is required to resolve symbols from llvm::cl, llvm::Support, llvm::Object, etc.
+llvm_map_components_to_libnames(LLVM_LIBS
+  Support
+  Option
+  Object
+  BitReader
+  Core
+  IRReader
+  MC
+  MCParser
+  Remarks
+)
+
 target_link_libraries(${PROJECT_NAME} PRIVATE
   fmt::fmt
   range-v3::range-v3
   triton::triton
+  ${LLVM_LIBS}
 )
 
 if(TITAN_BUILD_INTRINSICS)
