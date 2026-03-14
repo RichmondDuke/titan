@@ -72,49 +72,59 @@ jobs:
             -g CMakeToolchain `
             -b missing
 
-      - name: Install Z3 for Triton and export package_folder (Conan JSON)
+      - name: Install Z3 for Triton and resolve package_folder (Conan JSON; nodes is a map)
         shell: pwsh
         run: |
           $ref = "z3/${{ env.Z3_VERSION }}"
-
           $jsonPath = Join-Path $env:RUNNER_TEMP "conan-z3.json"
 
-          # Install Z3 and ask Conan for machine-readable output containing the resolved package folder
           conan install --requires="$ref" -s build_type=Release -b missing --format=json | Out-File -FilePath $jsonPath -Encoding utf8
-
           $j = Get-Content $jsonPath -Raw | ConvertFrom-Json
 
-          # Conan 2 JSON structure: try several known shapes (it has changed across versions).
-          $pkgFolder = $null
+          if (-not $j.graph -or -not $j.graph.nodes) {
+            throw "Unexpected Conan JSON: missing graph.nodes"
+          }
 
-          # Shape A: j.graph.nodes[]
-          if ($j.graph -and $j.graph.nodes) {
-            foreach ($n in $j.graph.nodes) {
-              if ($n.ref -like "z3/*") {
-                if ($n.package_folder) { $pkgFolder = $n.package_folder; break }
-                if ($n.packageFolder) { $pkgFolder = $n.packageFolder; break }
-              }
+          $pkgFolder = $null
+          $z3Node = $null
+
+          # graph.nodes is a map like { "0": {...}, "1": {...} }
+          foreach ($prop in $j.graph.nodes.PSObject.Properties) {
+            $node = $prop.Value
+            if ($node -and $node.ref -and ($node.ref -like "z3/*")) {
+              $z3Node = $node
+
+              # Try multiple known locations for package folder
+              if ($node.package_folder) { $pkgFolder = $node.package_folder }
+              elseif ($node.packageFolder) { $pkgFolder = $node.packageFolder }
+              elseif ($node.folders -and $node.folders.package_folder) { $pkgFolder = $node.folders.package_folder }
+              elseif ($node.folders -and $node.folders.package) { $pkgFolder = $node.folders.package }
+
+              break
             }
           }
 
-          # Shape B: j.nodes[]
-          if (-not $pkgFolder -and $j.nodes) {
-            foreach ($n in $j.nodes) {
-              if ($n.ref -like "z3/*") {
-                if ($n.package_folder) { $pkgFolder = $n.package_folder; break }
-                if ($n.packageFolder) { $pkgFolder = $n.packageFolder; break }
-              }
-            }
+          if (-not $z3Node) {
+            throw "Could not find a z3/* node in Conan JSON graph.nodes"
           }
 
           if (-not $pkgFolder) {
-            Write-Host "Could not find z3 package_folder in Conan JSON. Dumping first 2000 chars:"
+            Write-Host "Found z3 node but no package folder field. z3 node keys:"
+            $z3Node.PSObject.Properties | ForEach-Object { Write-Host (" - {0}" -f $_.Name) }
+
+            if ($z3Node.folders) {
+              Write-Host "z3 node folders keys:"
+              $z3Node.folders.PSObject.Properties | ForEach-Object { Write-Host (" - folders.{0}" -f $_.Name) }
+            }
+
+            Write-Host "Dumping first 2500 chars of JSON for debugging:"
             $raw = Get-Content $jsonPath -Raw
-            Write-Host $raw.Substring(0, [Math]::Min(2000, $raw.Length))
-            throw "Failed to locate z3 package_folder from Conan JSON output"
+            Write-Host $raw.Substring(0, [Math]::Min(2500, $raw.Length))
+
+            throw "Failed to locate z3 package folder from Conan JSON output (field name differs)"
           }
 
-          if (!(Test-Path $pkgFolder)) { throw "Resolved package_folder does not exist: $pkgFolder" }
+          if (!(Test-Path $pkgFolder)) { throw "Resolved z3 package folder does not exist: $pkgFolder" }
 
           $inc = Join-Path $pkgFolder "include"
           $libDir = Join-Path $pkgFolder "lib"
@@ -138,7 +148,7 @@ jobs:
           "Z3_INCLUDE_DIR=$inc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "Z3_LIBRARY=$($lib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          Write-Host ("Z3 package_folder: {0}" -f $pkgFolder)
+          Write-Host ("Z3 package folder: {0}" -f $pkgFolder)
           Write-Host ("Z3_INCLUDE_DIR={0}" -f $inc)
           Write-Host ("Z3_LIBRARY={0}" -f $lib.FullName)
 
