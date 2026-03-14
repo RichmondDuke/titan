@@ -13,6 +13,7 @@ jobs:
       BUILD_DIR: build
       TRITON_SRC_DIR: ${{ github.workspace }}\_deps\triton-src
       Z3_VERSION: "4.12.2"
+      CAPSTONE_VERSION: "5.0.1"
 
     steps:
       - name: Checkout (with submodules)
@@ -43,8 +44,10 @@ jobs:
         run: |
           set -euo pipefail
           conda info
+          # Build with MSVC cl.exe, avoid clang/cl mixing
           conda install -y "llvmdev=15.*" "lld=15.*" zlib libxml2 cmake ninja
           echo "$CONDA_PREFIX/Library/bin" >> "$GITHUB_PATH"
+
           LLVM_DIR="$CONDA_PREFIX/Library/lib/cmake/llvm"
           test -d "$LLVM_DIR"
           echo "LLVM_DIR=$LLVM_DIR" >> "$GITHUB_ENV"
@@ -72,85 +75,85 @@ jobs:
             -g CMakeToolchain `
             -b missing
 
-      - name: Install Z3 for Triton and resolve package_folder (Conan JSON; nodes is a map)
+      - name: Install Triton deps (Z3 + Capstone) and export include/lib paths (Conan JSON)
         shell: pwsh
         run: |
-          $ref = "z3/${{ env.Z3_VERSION }}"
-          $jsonPath = Join-Path $env:RUNNER_TEMP "conan-z3.json"
+          $refs = @(
+            "z3/${{ env.Z3_VERSION }}",
+            "capstone/${{ env.CAPSTONE_VERSION }}"
+          )
 
-          conan install --requires="$ref" -s build_type=Release -b missing --format=json | Out-File -FilePath $jsonPath -Encoding utf8
+          $jsonPath = Join-Path $env:RUNNER_TEMP "conan-triton-deps.json"
+
+          # Install both deps in one go and emit JSON graph
+          conan install --requires=$refs -s build_type=Release -b missing --format=json | Out-File -FilePath $jsonPath -Encoding utf8
           $j = Get-Content $jsonPath -Raw | ConvertFrom-Json
 
           if (-not $j.graph -or -not $j.graph.nodes) {
             throw "Unexpected Conan JSON: missing graph.nodes"
           }
 
-          $pkgFolder = $null
-          $z3Node = $null
-
-          # graph.nodes is a map like { "0": {...}, "1": {...} }
-          foreach ($prop in $j.graph.nodes.PSObject.Properties) {
-            $node = $prop.Value
-            if ($node -and $node.ref -and ($node.ref -like "z3/*")) {
-              $z3Node = $node
-
-              # Try multiple known locations for package folder
-              if ($node.package_folder) { $pkgFolder = $node.package_folder }
-              elseif ($node.packageFolder) { $pkgFolder = $node.packageFolder }
-              elseif ($node.folders -and $node.folders.package_folder) { $pkgFolder = $node.folders.package_folder }
-              elseif ($node.folders -and $node.folders.package) { $pkgFolder = $node.folders.package }
-
-              break
+          function Get-PackageFolder([string]$prefix) {
+            foreach ($prop in $j.graph.nodes.PSObject.Properties) {
+              $node = $prop.Value
+              if ($node -and $node.ref -and ($node.ref -like "$prefix*")) {
+                if ($node.package_folder) { return $node.package_folder }
+                if ($node.packageFolder) { return $node.packageFolder }
+                if ($node.folders -and $node.folders.package_folder) { return $node.folders.package_folder }
+                if ($node.folders -and $node.folders.package) { return $node.folders.package }
+              }
             }
+            return $null
           }
 
-          if (-not $z3Node) {
-            throw "Could not find a z3/* node in Conan JSON graph.nodes"
+          # ---- Z3 ----
+          $z3Folder = Get-PackageFolder "z3/"
+          if (-not $z3Folder) { throw "Failed to resolve z3 package folder from Conan JSON" }
+
+          $z3Inc = Join-Path $z3Folder "include"
+          $z3LibDir = Join-Path $z3Folder "lib"
+          if (!(Test-Path (Join-Path $z3Inc "z3.h"))) { throw "z3.h not found under $z3Inc" }
+
+          $z3Lib = Get-ChildItem -Path $z3LibDir -Filter "*.lib" -File -ErrorAction SilentlyContinue |
+                   Where-Object { $_.Name -match 'z3' } |
+                   Select-Object -First 1
+          if (-not $z3Lib) { throw "No z3 .lib found under $z3LibDir" }
+
+          "Z3_INCLUDE_DIR=$z3Inc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "Z3_LIBRARY=$($z3Lib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Write-Host ("Z3_INCLUDE_DIR={0}" -f $z3Inc)
+          Write-Host ("Z3_LIBRARY={0}" -f $z3Lib.FullName)
+
+          # ---- Capstone ----
+          $capFolder = Get-PackageFolder "capstone/"
+          if (-not $capFolder) { throw "Failed to resolve capstone package folder from Conan JSON" }
+
+          $capInc = Join-Path $capFolder "include"
+          $capLibDir = Join-Path $capFolder "lib"
+
+          # Capstone headers are typically under include/capstone/capstone.h
+          $capHdr = Join-Path $capInc "capstone\capstone.h"
+          if (!(Test-Path $capHdr)) {
+            Write-Host ("Listing include dir {0}:" -f $capInc)
+            Get-ChildItem -Force -Path $capInc -Recurse -Depth 3 -ErrorAction SilentlyContinue | Select-Object FullName | Select-Object -First 80
+            throw "capstone.h not found under $capInc"
           }
 
-          if (-not $pkgFolder) {
-            Write-Host "Found z3 node but no package folder field. z3 node keys:"
-            $z3Node.PSObject.Properties | ForEach-Object { Write-Host (" - {0}" -f $_.Name) }
-
-            if ($z3Node.folders) {
-              Write-Host "z3 node folders keys:"
-              $z3Node.folders.PSObject.Properties | ForEach-Object { Write-Host (" - folders.{0}" -f $_.Name) }
-            }
-
-            Write-Host "Dumping first 2500 chars of JSON for debugging:"
-            $raw = Get-Content $jsonPath -Raw
-            Write-Host $raw.Substring(0, [Math]::Min(2500, $raw.Length))
-
-            throw "Failed to locate z3 package folder from Conan JSON output (field name differs)"
+          $capLib = Get-ChildItem -Path $capLibDir -Filter "*.lib" -File -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -match 'capstone|cs' } |
+                    Select-Object -First 1
+          if (-not $capLib) {
+            Write-Host ("Listing lib dir {0}:" -f $capLibDir)
+            Get-ChildItem -Force -Path $capLibDir -ErrorAction SilentlyContinue | Select-Object FullName
+            throw "No capstone .lib found under $capLibDir"
           }
 
-          if (!(Test-Path $pkgFolder)) { throw "Resolved z3 package folder does not exist: $pkgFolder" }
+          "CAPSTONE_INCLUDE_DIR=$capInc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CAPSTONE_LIBRARY=$($capLib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          $inc = Join-Path $pkgFolder "include"
-          $libDir = Join-Path $pkgFolder "lib"
-
-          if (!(Test-Path (Join-Path $inc "z3.h"))) {
-            Write-Host ("Listing include dir {0}:" -f $inc)
-            Get-ChildItem -Force -Path $inc -ErrorAction SilentlyContinue | Select-Object FullName
-            throw "Expected z3.h not found under $inc"
-          }
-
-          $lib = Get-ChildItem -Path $libDir -Filter "*.lib" -File -ErrorAction SilentlyContinue |
-                 Where-Object { $_.Name -match 'z3' } |
-                 Select-Object -First 1
-
-          if (-not $lib) {
-            Write-Host ("Listing lib dir {0}:" -f $libDir)
-            Get-ChildItem -Force -Path $libDir -ErrorAction SilentlyContinue | Select-Object FullName
-            throw "No z3-related .lib found under $libDir"
-          }
-
-          "Z3_INCLUDE_DIR=$inc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "Z3_LIBRARY=$($lib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-          Write-Host ("Z3 package folder: {0}" -f $pkgFolder)
-          Write-Host ("Z3_INCLUDE_DIR={0}" -f $inc)
-          Write-Host ("Z3_LIBRARY={0}" -f $lib.FullName)
+          Write-Host ("CAPSTONE_INCLUDE_DIR={0}" -f $capInc)
+          Write-Host ("CAPSTONE_LIBRARY={0}" -f $capLib.FullName)
 
       - name: Clone Triton source
         shell: pwsh
@@ -160,7 +163,7 @@ jobs:
           git -C "_deps\triton-src" checkout "v0.9"
           git -C "_deps\triton-src" rev-parse HEAD
 
-      - name: Configure Triton (MSVC; explicit Z3; LLVM from conda)
+      - name: Configure Triton (MSVC; explicit Z3+Capstone; LLVM from conda)
         shell: pwsh
         run: |
           $src = "_deps\triton-src"
@@ -172,6 +175,8 @@ jobs:
             -DLLVM_DIR="$env:LLVM_DIR" `
             -DZ3_INCLUDE_DIR="$env:Z3_INCLUDE_DIR" `
             -DZ3_LIBRARY="$env:Z3_LIBRARY" `
+            -DCAPSTONE_INCLUDE_DIR="$env:CAPSTONE_INCLUDE_DIR" `
+            -DCAPSTONE_LIBRARY="$env:CAPSTONE_LIBRARY" `
             -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
 
       - name: Build & install Triton
