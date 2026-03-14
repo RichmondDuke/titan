@@ -4,17 +4,17 @@ project(titan)
 
 option(TITAN_BUILD_INTRINSICS "Build intrinsics targets (may not work on MSVC/Windows)" ON)
 
-# Packages
-# Packages
+# These must be found before LLVM because LLVM's exported targets may link against them
 find_package(ZLIB REQUIRED)
 find_package(LibXml2 REQUIRED)
 
+# Packages
 find_package(fmt CONFIG REQUIRED)
 find_package(LLVM 15.0 CONFIG REQUIRED)
 find_package(triton CONFIG REQUIRED)
 find_package(range-v3 CONFIG REQUIRED)
 
-file(GLOB_RECURSE TITAN_SOURCES  CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
+file(GLOB_RECURSE TITAN_SOURCES  CONFIGaURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 file(GLOB_RECURSE TITAN_INCLUDES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.hpp")
 source_group(TREE ${PROJECT_SOURCE_DIR} FILES ${TITAN_SOURCES} ${TITAN_INCLUDES})
 
@@ -31,8 +31,7 @@ endif()
 
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_20)
 
-# LLVM link (components -> libraries)
-# This is required to resolve symbols from llvm::cl, llvm::Support, llvm::Object, etc.
+# Link LLVM libs needed by this project
 llvm_map_components_to_libnames(LLVM_LIBS
   Support
   Option
