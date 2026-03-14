@@ -68,61 +68,77 @@ jobs:
           pip install "conan>=2.0,<3.0"
           conan profile detect --force
 
-      - name: Install Triton deps with Conan (Z3) + CMakeDeps
+      - name: Install Triton deps with Conan (Z3)
         shell: pwsh
         run: |
           if (Test-Path "${{ env.TRITON_DEPS_DIR }}") { Remove-Item -Recurse -Force "${{ env.TRITON_DEPS_DIR }}" }
 
+          # Note: not using CMakeDeps parsing anymore; we will use Z3's own Z3Config.cmake and query targets via CMake.
           conan install --requires="z3/${{ env.Z3_VERSION }}" `
             -of "${{ env.TRITON_DEPS_DIR }}" `
             -s build_type=Release `
-            -g CMakeDeps `
-            -g VirtualBuildEnv `
             -b missing
 
           Write-Host "Top-level listing of TRITON_DEPS_DIR:"
           Get-ChildItem -Force -Path "${{ env.TRITON_DEPS_DIR }}" | Select-Object FullName
 
-          Write-Host "Second-level listing of TRITON_DEPS_DIR:"
-          Get-ChildItem -Force -Path "${{ env.TRITON_DEPS_DIR }}" -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object FullName | Select-Object -First 200
-
-      - name: Extract Z3 paths for Triton (search recursively; no path assumptions)
+      - name: Extract Z3 include/lib from Z3Config.cmake via CMake target properties
         shell: pwsh
         run: |
-          $root = Resolve-Path "${{ env.TRITON_DEPS_DIR }}"
+          $prefix = Resolve-Path "${{ env.TRITON_DEPS_DIR }}"
 
-          # Find any Z3 config files produced by Conan CMakeDeps (names vary by recipe)
-          $cfg = Get-ChildItem -Path $root -Recurse -File -Include "*z3*config.cmake","*Z3*config.cmake","*Z3*Config.cmake","*z3*Config.cmake" -ErrorAction SilentlyContinue |
-                 Select-Object -First 1
+          $script = Join-Path $env:RUNNER_TEMP "query_z3.cmake"
+          @"
+          cmake_minimum_required(VERSION 3.15)
 
-          if (-not $cfg) {
-            Write-Host "No z3 config cmake found under: $root"
-            Write-Host "Showing first 400 files under TRITON_DEPS_DIR to debug:"
-            Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue | Select-Object FullName | Select-Object -First 400
-            throw "Z3 config cmake not found; Conan CMakeDeps output not located"
-          }
+          # Make sure CMake can find Z3Config.cmake under the Conan package folder
+          list(PREPEND CMAKE_PREFIX_PATH "${prefix}")
 
-          Write-Host "Using Z3 config: $($cfg.FullName)"
-          $txt = Get-Content $cfg.FullName -Raw
+          # Prefer CONFIG mode
+          find_package(Z3 CONFIG REQUIRED)
 
-          # Conan CMakeDeps commonly emits these variables
-          $inc = [regex]::Match($txt, 'set\(\s*Z3_INCLUDE_DIRS\s+"([^"]+)"').Groups[1].Value
-          $lib = [regex]::Match($txt, 'set\(\s*Z3_LIBRARIES\s+"([^"]+)"').Groups[1].Value
+          # Determine target name (varies by package)
+          set(_candidates z3::libz3 Z3::libz3 Z3::z3 z3::z3)
+          set(_tgt "")
+          foreach(c IN LISTS _candidates)
+            if(TARGET \${c})
+              set(_tgt \${c})
+              break()
+            endif()
+          endforeach()
 
-          if (-not $inc) { $inc = [regex]::Match($txt, 'set\(\s*Z3_INCLUDE_DIR\s+"([^"]+)"').Groups[1].Value }
-          if (-not $lib) { $lib = [regex]::Match($txt, 'set\(\s*Z3_LIBRARY\s+"([^"]+)"').Groups[1].Value }
+          if(_tgt STREQUAL "")
+            get_property(_allTargets GLOBAL PROPERTY TARGETS)
+            message(FATAL_ERROR "No known Z3 target found. Available targets: \${_allTargets}")
+          endif()
 
-          if (-not $inc -or -not $lib) {
-            throw "Failed to parse Z3_INCLUDE_DIR(S)/Z3_LIBRARY(IES) from $($cfg.FullName)"
-          }
+          get_target_property(_incs \${_tgt} INTERFACE_INCLUDE_DIRECTORIES)
+          if(NOT _incs)
+            set(_incs "")
+          endif()
 
-          if (!(Test-Path $inc)) { throw "Z3 include dir does not exist: $inc" }
-          if (!(Test-Path $lib)) { throw "Z3 library does not exist: $lib" }
+          # Imported location can be config-specific
+          get_target_property(_loc \${_tgt} IMPORTED_LOCATION_RELEASE)
+          if(NOT _loc)
+            get_target_property(_loc \${_tgt} IMPORTED_LOCATION)
+          endif()
 
-          "Z3_INCLUDE_DIR=$inc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "Z3_LIBRARY=$lib"     | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "Z3_INCLUDE_DIR=$inc"
-          Write-Host "Z3_LIBRARY=$lib"
+          if(NOT _loc)
+            message(FATAL_ERROR "Failed to read IMPORTED_LOCATION(_RELEASE) for target \${_tgt}")
+          endif()
+
+          # If include dirs is a list, take the first (Triton FindZ3 expects a single dir)
+          list(GET _incs 0 _inc0)
+
+          message(STATUS "Z3_TARGET=\${_tgt}")
+          message(STATUS "Z3_INCLUDE_DIR=\${_inc0}")
+          message(STATUS "Z3_LIBRARY=\${_loc}")
+
+          file(APPEND "$ENV{GITHUB_ENV}" "Z3_INCLUDE_DIR=\${_inc0}\\n")
+          file(APPEND "$ENV{GITHUB_ENV}" "Z3_LIBRARY=\${_loc}\\n")
+          "@ | Set-Content -Path $script -Encoding UTF8
+
+          cmake -P $script
 
       - name: Conan install deps for titan (fmt/range-v3/z3/capstone)
         shell: pwsh
