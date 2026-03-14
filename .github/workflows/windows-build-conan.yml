@@ -120,13 +120,6 @@ jobs:
             exit 0
           }
 
-          Write-Host "ERROR: conanbuild script not found under $root"
-          Write-Host "Debug: top-level entries:"
-          Get-ChildItem -Force $root | Select-Object FullName
-          Write-Host "Debug: generators entries:"
-          if (Test-Path (Join-Path $root "build\generators")) {
-            Get-ChildItem -Force (Join-Path $root "build\generators") | Select-Object FullName
-          }
           throw "Expected Conan VirtualBuildEnv script (conanbuild.bat/ps1) was not generated."
 
       - name: Configure (CMake) with Conan virtual env
@@ -134,6 +127,46 @@ jobs:
         run: |
           $conanGen = Resolve-Path "$env:BUILD_DIR\conan\build\generators"
           $toolchain = Join-Path $conanGen "conan_toolchain.cmake"
+          $tritonRoot = "${{ env.TRITON_DIR }}"
+          $buildDir = "${env:BUILD_DIR}"
+          $llvmDir = "${env:LLVM_DIR}"
+          $prefixPath = $conanGen.Path
+          $conanScript = "${env:CONANBUILD_SCRIPT}"
 
-          if ($env:CONANBUILD_KIND -eq "bat") {
-            cmd /c "call `"$env:`](#)
+          if ("${env:CONANBUILD_KIND}" -eq "bat") {
+            cmd /c "call `"$conanScript`" && cmake -S . -B `"$buildDir`" -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=`"$toolchain`" -DCMAKE_PREFIX_PATH=`"$prefixPath`" -DLLVM_DIR=`"$llvmDir`" -DTRITON_ROOT=`"$tritonRoot`""
+          } elseif ("${env:CONANBUILD_KIND}" -eq "ps1") {
+            . $conanScript
+            cmake -S . -B $buildDir `
+              -DCMAKE_BUILD_TYPE=Release `
+              -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
+              -DCMAKE_PREFIX_PATH="$prefixPath" `
+              -DLLVM_DIR="$llvmDir" `
+              -DTRITON_ROOT="$tritonRoot"
+          } else {
+            throw "Unknown CONANBUILD_KIND=${env:CONANBUILD_KIND}"
+          }
+
+      - name: Build titan.exe with Conan virtual env
+        shell: pwsh
+        run: |
+          $buildDir = "${env:BUILD_DIR}"
+          $conanScript = "${env:CONANBUILD_SCRIPT}"
+
+          if ("${env:CONANBUILD_KIND}" -eq "bat") {
+            cmd /c "call `"$conanScript`" && cmake --build `"$buildDir`" --config Release --parallel"
+          } elseif ("${env:CONANBUILD_KIND}" -eq "ps1") {
+            . $conanScript
+            cmake --build $buildDir --config Release --parallel
+          } else {
+            throw "Unknown CONANBUILD_KIND=${env:CONANBUILD_KIND}"
+          }
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: titan-windows-release
+          path: |
+            build/titan.exe
+            build/Release/titan.exe
+            intrinsics/vmprotect64.ll
