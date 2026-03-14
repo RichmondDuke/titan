@@ -193,46 +193,62 @@ jobs:
           git -C "_deps\triton-src" checkout "v0.9"
           git -C "_deps\triton-src" rev-parse HEAD
 
-      # ★ 真正的根因修复：
-      # Triton v0.9 的 LIBTRITON_SOURCE_FILES 里无条件包含了两个 Python 相关的 .cpp：
-      #   ast/representations/astPythonRepresentation.cpp
-      #   engines/lifters/liftingToPython.cpp
-      # 它们 #include <Python.h>，而 Python 3.11 删除了 longintrepr.h，导致编译失败。
-      # 这两个文件不在 if(PYTHON_BINDINGS) 块里，所以任何 cmake 变量都控制不了它们。
-      # 解决：直接从 LIBTRITON_SOURCE_FILES 列表里删除这两行，同时删掉 if(PYTHON_BINDINGS) 块。
-      - name: Patch Triton CMakeLists - remove Python source files and bindings block
+      - name: Patch Triton source
         shell: python
         run: |
           import re, pathlib, sys
 
+          # ── Patch 1: externalLibs.hpp ─────────────────────────────────────────
+          # Triton v0.9 在 Windows 上写的是 #include <capstone.h>（无子目录），
+          # 但 Conan 安装的 capstone 4.x 头文件在 include/capstone/ 子目录下。
+          # 把 Windows 分支改成和 Unix 一样使用 capstone/ 子目录路径。
+          ext_hpp = pathlib.Path(
+              "_deps/triton-src/src/libtriton/includes/triton/externalLibs.hpp"
+          )
+          ext_text = ext_hpp.read_text(encoding="utf-8")
+
+          old_win = r"#elif _WIN32\s*\n\s*#include\s*<capstone\.h>"
+          new_win = (
+              "#elif _WIN32\n"
+              "        #include <capstone/arm64.h>\n"
+              "        #include <capstone/arm.h>\n"
+              "        #include <capstone/capstone.h>\n"
+              "        #include <capstone/x86.h>"
+          )
+          ext_patched = re.sub(old_win, new_win, ext_text)
+          if ext_patched == ext_text:
+              # 尝试更宽松的匹配
+              ext_patched = ext_text.replace(
+                  "#elif _WIN32\n        #include <capstone.h>",
+                  new_win
+              )
+          ext_hpp.write_text(ext_patched, encoding="utf-8")
+          print(f"Patched {ext_hpp}")
+          print("  New Windows capstone includes:")
+          for line in ext_patched.splitlines():
+              if "capstone" in line or "_WIN32" in line:
+                  print(f"    {line}")
+
+          # ── Patch 2: libtriton/CMakeLists.txt ────────────────────────────────
+          # 从 LIBTRITON_SOURCE_FILES 无条件列表中删除两个 Python .cpp（需要 longintrepr.h）
+          # 并删除整个 if(PYTHON_BINDINGS)...endif() 块
           lib_cml = pathlib.Path("_deps/triton-src/src/libtriton/CMakeLists.txt")
           text = lib_cml.read_text(encoding="utf-8")
 
-          print("=== BEFORE patch: Python-related lines ===")
-          for i, line in enumerate(text.splitlines(), 1):
-              if re.search(r'[Pp]ython|\.pyd|bindings', line):
-                  print(f"  L{i}: {line}")
-          print("==========================================")
-
-          # 1. 从 LIBTRITON_SOURCE_FILES 无条件列表中删除两个 Python .cpp 文件
-          #    这两行在 set(LIBTRITON_SOURCE_FILES ...) 块内，不在任何 if() 里
+          # 删除无条件编译的 Python .cpp
           text = re.sub(
               r'\n[ \t]*ast/representations/astPythonRepresentation\.cpp[ \t]*',
-              '',
-              text
+              '', text
           )
           text = re.sub(
               r'\n[ \t]*engines/lifters/liftingToPython\.cpp[ \t]*',
-              '',
-              text
+              '', text
           )
 
-          # 2. 删除整个 if(PYTHON_BINDINGS) ... endif() 块（含 bindings/python/*.cpp）
-          #    用状态机精确匹配，避免误删其他 if/endif
+          # 删除 if(PYTHON_BINDINGS)...endif() 块
           lines = text.splitlines(keepends=True)
           result = []
           skip_depth = 0
-
           for line in lines:
               stripped = line.strip()
               if skip_depth == 0:
@@ -245,20 +261,10 @@ jobs:
                       skip_depth += 1
                   elif re.match(r'endif\s*\(', stripped, re.IGNORECASE):
                       skip_depth -= 1
-                  # 当 skip_depth 回到 0 时，这个 endif 行也跳过（不 append）
+          lib_cml.write_text("".join(result), encoding="utf-8")
+          print(f"Patched {lib_cml}: removed Python source entries and PYTHON_BINDINGS block")
 
-          text = "".join(result)
-
-          lib_cml.write_text(text, encoding="utf-8")
-          print(f"Patched {lib_cml}")
-
-          print("=== AFTER patch: Python-related lines ===")
-          for i, line in enumerate(text.splitlines(), 1):
-              if re.search(r'[Pp]ython|\.pyd|bindings', line):
-                  print(f"  L{i}: {line}")
-          print("=========================================")
-
-          # 3. 同时在顶层 CMakeLists.txt 注入强制 OFF（防止其他地方检测 Python）
+          # ── Patch 3: top-level CMakeLists.txt ────────────────────────────────
           top_cml = pathlib.Path("_deps/triton-src/CMakeLists.txt")
           top_text = top_cml.read_text(encoding="utf-8")
           inject = (
@@ -269,8 +275,7 @@ jobs:
           )
           top_text = re.sub(
               r'(cmake_minimum_required\s*\([^)]*\))',
-              r'\1' + inject,
-              top_text
+              r'\1' + inject, top_text
           )
           top_cml.write_text(top_text, encoding="utf-8")
           print(f"Patched {top_cml}")
