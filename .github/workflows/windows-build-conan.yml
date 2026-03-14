@@ -199,53 +199,59 @@ jobs:
           import re, pathlib, sys
 
           # ── Patch 1: externalLibs.hpp ─────────────────────────────────────────
-          # Triton v0.9 在 Windows 上写的是 #include <capstone.h>（无子目录），
-          # 但 Conan 安装的 capstone 4.x 头文件在 include/capstone/ 子目录下。
-          # 把 Windows 分支改成和 Unix 一样使用 capstone/ 子目录路径。
+          # Triton v0.9 在 Windows 上用 #include <capstone.h>（无子目录），
+          # 但 Conan capstone 4.x 头文件在 include/capstone/ 子目录下。
+          # 改成与 Unix 分支一致的带子目录路径。
           ext_hpp = pathlib.Path(
               "_deps/triton-src/src/libtriton/includes/triton/externalLibs.hpp"
           )
           ext_text = ext_hpp.read_text(encoding="utf-8")
-
-          old_win = r"#elif _WIN32\s*\n\s*#include\s*<capstone\.h>"
-          new_win = (
+          new_win_block = (
               "#elif _WIN32\n"
               "        #include <capstone/arm64.h>\n"
               "        #include <capstone/arm.h>\n"
               "        #include <capstone/capstone.h>\n"
               "        #include <capstone/x86.h>"
           )
-          ext_patched = re.sub(old_win, new_win, ext_text)
+          # 替换 #elif _WIN32 \n #include <capstone.h> 那一段
+          ext_patched = re.sub(
+              r'#elif\s+_WIN32\s*\n\s*#include\s*<capstone\.h>',
+              new_win_block,
+              ext_text
+          )
           if ext_patched == ext_text:
-              # 尝试更宽松的匹配
-              ext_patched = ext_text.replace(
-                  "#elif _WIN32\n        #include <capstone.h>",
-                  new_win
-              )
+              print("WARNING: externalLibs.hpp pattern not matched, trying literal replace")
+              # 逐行查找并替换
+              lines = ext_text.splitlines(keepends=True)
+              out = []
+              i = 0
+              while i < len(lines):
+                  if '_WIN32' in lines[i] and i + 1 < len(lines) and 'capstone.h' in lines[i+1]:
+                      out.append(lines[i])  # keep #elif _WIN32
+                      out.append('        #include <capstone/arm64.h>\n')
+                      out.append('        #include <capstone/arm.h>\n')
+                      out.append('        #include <capstone/capstone.h>\n')
+                      out.append('        #include <capstone/x86.h>\n')
+                      i += 2  # skip old #include <capstone.h> line
+                      continue
+                  out.append(lines[i])
+                  i += 1
+              ext_patched = "".join(out)
           ext_hpp.write_text(ext_patched, encoding="utf-8")
           print(f"Patched {ext_hpp}")
-          print("  New Windows capstone includes:")
+          print("  Resulting capstone include section:")
           for line in ext_patched.splitlines():
-              if "capstone" in line or "_WIN32" in line:
+              if 'capstone' in line or '_WIN32' in line or '__unix__' in line:
                   print(f"    {line}")
 
           # ── Patch 2: libtriton/CMakeLists.txt ────────────────────────────────
-          # 从 LIBTRITON_SOURCE_FILES 无条件列表中删除两个 Python .cpp（需要 longintrepr.h）
-          # 并删除整个 if(PYTHON_BINDINGS)...endif() 块
+          # 注意：liftingToPython.cpp 和 astPythonRepresentation.cpp 是纯 C++ 文件，
+          # 不含 Python.h，必须保留！只需删除 if(PYTHON_BINDINGS)...endif() 块，
+          # 该块包含 bindings/python/*.cpp（这些才是依赖 longintrepr.h 的文件）。
           lib_cml = pathlib.Path("_deps/triton-src/src/libtriton/CMakeLists.txt")
           text = lib_cml.read_text(encoding="utf-8")
 
-          # 删除无条件编译的 Python .cpp
-          text = re.sub(
-              r'\n[ \t]*ast/representations/astPythonRepresentation\.cpp[ \t]*',
-              '', text
-          )
-          text = re.sub(
-              r'\n[ \t]*engines/lifters/liftingToPython\.cpp[ \t]*',
-              '', text
-          )
-
-          # 删除 if(PYTHON_BINDINGS)...endif() 块
+          # 仅删除 if(PYTHON_BINDINGS)...endif() 块
           lines = text.splitlines(keepends=True)
           result = []
           skip_depth = 0
@@ -261,8 +267,10 @@ jobs:
                       skip_depth += 1
                   elif re.match(r'endif\s*\(', stripped, re.IGNORECASE):
                       skip_depth -= 1
+                  # skip_depth == 0 时对应的 endif 行也跳过（不 append）
           lib_cml.write_text("".join(result), encoding="utf-8")
-          print(f"Patched {lib_cml}: removed Python source entries and PYTHON_BINDINGS block")
+          print(f"Patched {lib_cml}: removed if(PYTHON_BINDINGS) block only")
+          print("  (liftingToPython.cpp and astPythonRepresentation.cpp are KEPT - they are pure C++)")
 
           # ── Patch 3: top-level CMakeLists.txt ────────────────────────────────
           top_cml = pathlib.Path("_deps/triton-src/CMakeLists.txt")
@@ -275,7 +283,8 @@ jobs:
           )
           top_text = re.sub(
               r'(cmake_minimum_required\s*\([^)]*\))',
-              r'\1' + inject, top_text
+              r'\1' + inject,
+              top_text
           )
           top_cml.write_text(top_text, encoding="utf-8")
           print(f"Patched {top_cml}")
