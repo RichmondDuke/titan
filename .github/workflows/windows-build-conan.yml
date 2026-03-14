@@ -214,12 +214,12 @@ jobs:
           # 在 project() 行之后插入强制关闭语句
           $inject = @"
 
-# ---- injected by CI: disable all Python bindings ----
-set(PYTHON_BINDINGS         OFF CACHE BOOL "" FORCE)
-set(WITH_PYTHON_BINDINGS    OFF CACHE BOOL "" FORCE)
-set(TRITON_BUILD_PYTHON_BINDINGS OFF CACHE BOOL "" FORCE)
-# -------------------------------------------------------
-"@
+          # ---- injected by CI: disable all Python bindings ----
+          set(PYTHON_BINDINGS         OFF CACHE BOOL "" FORCE)
+          set(WITH_PYTHON_BINDINGS    OFF CACHE BOOL "" FORCE)
+          set(TRITON_BUILD_PYTHON_BINDINGS OFF CACHE BOOL "" FORCE)
+          # -------------------------------------------------------
+          "@
           # 找到 project( 行并在其后插入
           $topContent = $topContent -replace '(project\([^\)]*\))', "`$1`n$inject"
           Set-Content $topCml $topContent -Encoding utf8
