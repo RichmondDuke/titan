@@ -45,7 +45,6 @@ jobs:
           conda install -y "llvmdev=15.*" "clang=15.*" "lld=15.*"
           echo "CONDA_PREFIX=$CONDA_PREFIX"
           test -n "${CONDA_PREFIX:-}"
-
           if [ -d "$CONDA_PREFIX/Library/bin" ]; then
             echo "$CONDA_PREFIX/Library/bin" >> "$GITHUB_PATH"
           fi
@@ -99,32 +98,42 @@ jobs:
             -g VirtualRunEnv `
             -b missing
 
-      - name: Configure (CMake) with conanbuild.bat
+      - name: Locate Conan virtual env script
         shell: pwsh
         run: |
-          $conanFolder = Resolve-Path "$env:BUILD_DIR\conan"
-          $conanBuildBat = Join-Path $conanFolder "conanbuild.bat"
-          if (!(Test-Path $conanBuildBat)) { throw "Expected Conan VirtualBuildEnv at $conanBuildBat" }
+          $root = Resolve-Path "$env:BUILD_DIR\conan"
 
+          $bat = Get-ChildItem -Path $root -Recurse -Filter "conanbuild.bat" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $ps1 = Get-ChildItem -Path $root -Recurse -Filter "conanbuild.ps1" -ErrorAction SilentlyContinue | Select-Object -First 1
+
+          if ($bat) {
+            "CONANBUILD_SCRIPT=$($bat.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            "CONANBUILD_KIND=bat" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            Write-Host "Found conanbuild.bat: $($bat.FullName)"
+            exit 0
+          }
+
+          if ($ps1) {
+            "CONANBUILD_SCRIPT=$($ps1.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            "CONANBUILD_KIND=ps1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            Write-Host "Found conanbuild.ps1: $($ps1.FullName)"
+            exit 0
+          }
+
+          Write-Host "ERROR: conanbuild script not found under $root"
+          Write-Host "Debug: top-level entries:"
+          Get-ChildItem -Force $root | Select-Object FullName
+          Write-Host "Debug: generators entries:"
+          if (Test-Path (Join-Path $root "build\generators")) {
+            Get-ChildItem -Force (Join-Path $root "build\generators") | Select-Object FullName
+          }
+          throw "Expected Conan VirtualBuildEnv script (conanbuild.bat/ps1) was not generated."
+
+      - name: Configure (CMake) with Conan virtual env
+        shell: pwsh
+        run: |
           $conanGen = Resolve-Path "$env:BUILD_DIR\conan\build\generators"
           $toolchain = Join-Path $conanGen "conan_toolchain.cmake"
 
-          cmd /c "call `"$conanBuildBat`" && cmake -S . -B `"$env:BUILD_DIR`" -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=`"$toolchain`" -DCMAKE_PREFIX_PATH=`"$($conanGen.Path)`" -DLLVM_DIR=`"$env:LLVM_DIR`" -DTRITON_ROOT=`"${{ env.TRITON_DIR }}`""
-
-      - name: Build titan.exe with conanbuild.bat
-        shell: pwsh
-        run: |
-          $conanFolder = Resolve-Path "$env:BUILD_DIR\conan"
-          $conanBuildBat = Join-Path $conanFolder "conanbuild.bat"
-          if (!(Test-Path $conanBuildBat)) { throw "Expected Conan VirtualBuildEnv at $conanBuildBat" }
-
-          cmd /c "call `"$conanBuildBat`" && cmake --build `"$env:BUILD_DIR`" --config Release --parallel"
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: titan-windows-release
-          path: |
-            build/titan.exe
-            build/Release/titan.exe
-            intrinsics/vmprotect64.ll
+          if ($env:CONANBUILD_KIND -eq "bat") {
+            cmd /c "call `"$env:`](#)
