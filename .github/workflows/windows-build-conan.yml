@@ -12,6 +12,7 @@ jobs:
     env:
       BUILD_DIR: build
       TRITON_SRC_DIR: ${{ github.workspace }}\_deps\triton-src
+      TRITON_DEPS_DIR: ${{ github.workspace }}\_deps\triton-deps
 
     steps:
       - name: Checkout (with submodules)
@@ -36,17 +37,16 @@ jobs:
         run: |
           set -euo pipefail
           conda info
-          # Keep LLVM/headers/libs in conda; build with MSVC (cl) not conda clang
           conda install -y "llvmdev=15.*" "lld=15.*" zlib libxml2 cmake ninja
           echo "CONDA_PREFIX=$CONDA_PREFIX"
           test -n "${CONDA_PREFIX:-}"
+          echo "$CONDA_PREFIX/Library/bin" >> "$GITHUB_PATH"
 
-          # Export LLVM_DIR for CMake find_package(LLVM CONFIG)
           LLVM_DIR="$CONDA_PREFIX/Library/lib/cmake/llvm"
           test -d "$LLVM_DIR"
           echo "LLVM_DIR=$LLVM_DIR" >> "$GITHUB_ENV"
 
-      - name: Set TRITON_INSTALL_DIR (avoid ${{ runner.temp }} yaml issues)
+      - name: Set TRITON_INSTALL_DIR
         shell: pwsh
         run: |
           "TRITON_INSTALL_DIR=$env:RUNNER_TEMP\triton-install" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -58,84 +58,80 @@ jobs:
           python-version: "3.11"
 
       - name: Install Conan 2
-        shell: bash -l {0}
+        shell: pwsh
         run: |
-          set -euo pipefail
           python -m pip install --upgrade pip
           pip install "conan>=2.0,<3.0"
           conan profile detect --force
 
-      - name: Conan install deps (fmt/range-v3/z3/capstone)
-        shell: bash -l {0}
+      - name: Install Triton deps with Conan (Z3) + VirtualBuildEnv
+        shell: pwsh
         run: |
-          set -euo pipefail
-          conan install . \
-            -of "${BUILD_DIR}/conan" \
-            -s build_type=Release \
-            -s compiler.cppstd=20 \
-            -g CMakeDeps \
-            -g CMakeToolchain \
+          # TODO: align z3 version with your titan conanfile
+          conan install --requires="z3/4.12.2" `
+            -of "${{ env.TRITON_DEPS_DIR }}" `
+            -s build_type=Release `
+            -g VirtualBuildEnv `
+            -g VirtualRunEnv `
+            -b missing
+
+          $bat = Get-ChildItem -Path "${{ env.TRITON_DEPS_DIR }}" -Recurse -Filter "conanbuild.bat" | Select-Object -First 1
+          if (-not $bat) { throw "conanbuild.bat not found for Triton deps" }
+          "TRITON_CONANBUILD_BAT=$($bat.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "TRITON_CONANBUILD_BAT=$($bat.FullName)"
+
+      - name: Conan install deps for titan (fmt/range-v3/z3/capstone)
+        shell: pwsh
+        run: |
+          conan install . `
+            -of "$env:BUILD_DIR\conan" `
+            -s build_type=Release `
+            -s compiler.cppstd=20 `
+            -g CMakeDeps `
+            -g CMakeToolchain `
             -b missing
 
       - name: Clone Triton source
-        shell: bash -l {0}
+        shell: pwsh
         run: |
-          set -euo pipefail
-          rm -rf "_deps/triton-src"
-          git clone https://github.com/JonathanSalwan/Triton "_deps/triton-src"
-          cd "_deps/triton-src"
+          if (Test-Path "${{ env.TRITON_SRC_DIR }}") { Remove-Item -Recurse -Force "${{ env.TRITON_SRC_DIR }}" }
+          git clone https://github.com/JonathanSalwan/Triton "${{ env.TRITON_SRC_DIR }}"
+          git -C "${{ env.TRITON_SRC_DIR }}" checkout v0.9
+          git -C "${{ env.TRITON_SRC_DIR }}" rev-parse HEAD
 
-          # Prefer v0.9 tag; if it doesn't exist in upstream, pin to the commit you want.
-          git checkout "v0.9"
-          git rev-parse HEAD
-
-      - name: Configure Triton (MSVC only; no clang/cl mixing)
-        shell: bash -l {0}
+      - name: Configure Triton (MSVC only, with Z3 from Conan env)
+        shell: pwsh
         run: |
-          set -euo pipefail
-          cmake -S "_deps/triton-src" -B "_deps/triton-build" \
-            -G "Visual Studio 17 2022" -A x64 \
-            -DCMAKE_INSTALL_PREFIX="${TRITON_INSTALL_DIR}" \
-            -DLLVM_DIR="${LLVM_DIR}" \
-            -DCMAKE_C_COMPILER=cl \
-            -DCMAKE_CXX_COMPILER=cl
+          $src = "${{ env.TRITON_SRC_DIR }}"
+          $bld = "_deps\triton-build"
+          $inst = "$env:TRITON_INSTALL_DIR"
+          $llvm = "$env:LLVM_DIR"
+          $conanbat = "$env:TRITON_CONANBUILD_BAT"
+
+          cmd /c "call `"$conanbat`" && cmake -S `"$src`" -B `"$bld`" -G `"Visual Studio 17 2022`" -A x64 -DCMAKE_INSTALL_PREFIX=`"$inst`" -DLLVM_DIR=`"$llvm`" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl"
 
       - name: Build & install Triton
-        shell: bash -l {0}
+        shell: pwsh
         run: |
-          set -euo pipefail
-          cmake --build "_deps/triton-build" --config Release --parallel
-          cmake --install "_deps/triton-build" --config Release
-
-          test -f "${TRITON_INSTALL_DIR}/lib/cmake/triton/tritonConfig.cmake"
+          $conanbat = "$env:TRITON_CONANBUILD_BAT"
+          cmd /c "call `"$conanbat`" && cmake --build `_deps\triton-build` --config Release --parallel && cmake --install `_deps\triton-build` --config Release"
 
       - name: Configure titan (CMake)
-        shell: bash -l {0}
+        shell: pwsh
         run: |
-          set -euo pipefail
-          CONAN_GEN="${BUILD_DIR}/conan/build/generators"
+          $conanGen = Resolve-Path "$env:BUILD_DIR\conan\build\generators"
+          $toolchain = Join-Path $conanGen "conan_toolchain.cmake"
+          $prefixPath = "$($conanGen.Path);$env:CONDA_PREFIX\Library;$env:TRITON_INSTALL_DIR"
 
-          # Ensure CMake can find conda-provided ZLIB/LibXml2 so LLVM exports resolve ZLIB::ZLIB etc.
-          cmake -S . -B "${BUILD_DIR}" \
-            -G "Visual Studio 17 2022" -A x64 \
-            -DCMAKE_TOOLCHAIN_FILE="${CONAN_GEN}/conan_toolchain.cmake" \
-            -DCMAKE_PREFIX_PATH="${CONAN_GEN};${CONDA_PREFIX}/Library;${TRITON_INSTALL_DIR}" \
-            -DLLVM_DIR="${LLVM_DIR}" \
-            -Dtriton_DIR="${TRITON_INSTALL_DIR}/lib/cmake/triton" \
-            -DTITAN_BUILD_INTRINSICS=OFF \
-            -DCMAKE_C_COMPILER=cl \
-            -DCMAKE_CXX_COMPILER=cl
+          cmake -S . -B "$env:BUILD_DIR" -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
+            -DCMAKE_PREFIX_PATH="$prefixPath" `
+            -DLLVM_DIR="$env:LLVM_DIR" `
+            -Dtriton_DIR="$env:TRITON_INSTALL_DIR\lib\cmake\triton" `
+            -DTITAN_BUILD_INTRINSICS=OFF `
+            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
 
       - name: Build titan.exe (Release)
-        shell: bash -l {0}
+        shell: pwsh
         run: |
-          set -euo pipefail
-          cmake --build "${BUILD_DIR}" --config Release --target titan --parallel
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: titan-windows-release
-          path: |
-            build/titan.exe
-            build/Release/titan.exe
+          cmake --build "$env:BUILD_DIR" --config Release --target titan --parallel
