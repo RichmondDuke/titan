@@ -13,7 +13,7 @@ jobs:
       BUILD_DIR: build
       TRITON_SRC_DIR: ${{ github.workspace }}\_deps\triton-src
       TRITON_DEPS_DIR: ${{ github.workspace }}\_deps\triton-deps
-      # Pin Z3 version for Triton build (must be >= 4.6.0)
+      # Triton requires Z3 >= 4.6.0. Pin a stable version.
       Z3_VERSION: "4.12.2"
 
     steps:
@@ -44,8 +44,10 @@ jobs:
           echo "CONDA_PREFIX=$CONDA_PREFIX"
           test -n "${CONDA_PREFIX:-}"
 
+          # Make conda DLLs/tools visible
           echo "$CONDA_PREFIX/Library/bin" >> "$GITHUB_PATH"
 
+          # Export LLVM_DIR for find_package(LLVM CONFIG)
           LLVM_DIR="$CONDA_PREFIX/Library/lib/cmake/llvm"
           test -d "$LLVM_DIR"
           echo "LLVM_DIR=$LLVM_DIR" >> "$GITHUB_ENV"
@@ -68,12 +70,11 @@ jobs:
           pip install "conan>=2.0,<3.0"
           conan profile detect --force
 
-      - name: Install Triton deps with Conan (Z3)
+      - name: Install Z3 for Triton via Conan
         shell: pwsh
         run: |
           if (Test-Path "${{ env.TRITON_DEPS_DIR }}") { Remove-Item -Recurse -Force "${{ env.TRITON_DEPS_DIR }}" }
 
-          # Note: not using CMakeDeps parsing anymore; we will use Z3's own Z3Config.cmake and query targets via CMake.
           conan install --requires="z3/${{ env.Z3_VERSION }}" `
             -of "${{ env.TRITON_DEPS_DIR }}" `
             -s build_type=Release `
@@ -82,63 +83,43 @@ jobs:
           Write-Host "Top-level listing of TRITON_DEPS_DIR:"
           Get-ChildItem -Force -Path "${{ env.TRITON_DEPS_DIR }}" | Select-Object FullName
 
-      - name: Extract Z3 include/lib from Z3Config.cmake via CMake target properties
+      - name: Locate Z3 include/lib paths (no CMake scripting)
         shell: pwsh
         run: |
-          $prefix = Resolve-Path "${{ env.TRITON_DEPS_DIR }}"
+          $root = Resolve-Path "${{ env.TRITON_DEPS_DIR }}"
 
-          $script = Join-Path $env:RUNNER_TEMP "query_z3.cmake"
-          @"
-          cmake_minimum_required(VERSION 3.15)
+          # Find include dir by locating z3 headers
+          $hdr = Get-ChildItem -Path $root -Recurse -File -Filter "z3++.h" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $hdr) { $hdr = Get-ChildItem -Path $root -Recurse -File -Filter "z3.h" -ErrorAction SilentlyContinue | Select-Object -First 1 }
+          if (-not $hdr) {
+            Write-Host "Could not find z3 headers under $root. Showing first 300 files:"
+            Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue | Select-Object FullName | Select-Object -First 300
+            throw "Z3 headers not found"
+          }
+          $inc = $hdr.Directory.FullName
+          Write-Host "Z3 header found: $($hdr.FullName)"
+          Write-Host "Z3 include dir: $inc"
 
-          # Make sure CMake can find Z3Config.cmake under the Conan package folder
-          list(PREPEND CMAKE_PREFIX_PATH "${prefix}")
+          # Find library by locating a .lib (MSVC import/static library)
+          $libs = Get-ChildItem -Path $root -Recurse -File -Filter "*.lib" -ErrorAction SilentlyContinue
 
-          # Prefer CONFIG mode
-          find_package(Z3 CONFIG REQUIRED)
+          # Prefer canonical names first
+          $pref = $libs | Where-Object { $_.Name -match '^z3(\.lib|\.static\.lib)?$' -or $_.Name -match '^libz3.*\.lib$' } | Select-Object -First 1
+          if (-not $pref) {
+            # Fallback: any lib containing z3
+            $pref = $libs | Where-Object { $_.Name -match 'z3' } | Select-Object -First 1
+          }
+          if (-not $pref) {
+            Write-Host "No .lib found under $root. Showing first 200 libs:"
+            $libs | Select-Object FullName | Select-Object -First 200
+            throw "Z3 .lib not found"
+          }
 
-          # Determine target name (varies by package)
-          set(_candidates z3::libz3 Z3::libz3 Z3::z3 z3::z3)
-          set(_tgt "")
-          foreach(c IN LISTS _candidates)
-            if(TARGET \${c})
-              set(_tgt \${c})
-              break()
-            endif()
-          endforeach()
+          $lib = $pref.FullName
+          Write-Host "Z3 library chosen: $lib"
 
-          if(_tgt STREQUAL "")
-            get_property(_allTargets GLOBAL PROPERTY TARGETS)
-            message(FATAL_ERROR "No known Z3 target found. Available targets: \${_allTargets}")
-          endif()
-
-          get_target_property(_incs \${_tgt} INTERFACE_INCLUDE_DIRECTORIES)
-          if(NOT _incs)
-            set(_incs "")
-          endif()
-
-          # Imported location can be config-specific
-          get_target_property(_loc \${_tgt} IMPORTED_LOCATION_RELEASE)
-          if(NOT _loc)
-            get_target_property(_loc \${_tgt} IMPORTED_LOCATION)
-          endif()
-
-          if(NOT _loc)
-            message(FATAL_ERROR "Failed to read IMPORTED_LOCATION(_RELEASE) for target \${_tgt}")
-          endif()
-
-          # If include dirs is a list, take the first (Triton FindZ3 expects a single dir)
-          list(GET _incs 0 _inc0)
-
-          message(STATUS "Z3_TARGET=\${_tgt}")
-          message(STATUS "Z3_INCLUDE_DIR=\${_inc0}")
-          message(STATUS "Z3_LIBRARY=\${_loc}")
-
-          file(APPEND "$ENV{GITHUB_ENV}" "Z3_INCLUDE_DIR=\${_inc0}\\n")
-          file(APPEND "$ENV{GITHUB_ENV}" "Z3_LIBRARY=\${_loc}\\n")
-          "@ | Set-Content -Path $script -Encoding UTF8
-
-          cmake -P $script
+          "Z3_INCLUDE_DIR=$inc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "Z3_LIBRARY=$lib"     | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Conan install deps for titan (fmt/range-v3/z3/capstone)
         shell: pwsh
@@ -156,6 +137,8 @@ jobs:
         run: |
           if (Test-Path "${{ env.TRITON_SRC_DIR }}") { Remove-Item -Recurse -Force "${{ env.TRITON_SRC_DIR }}" }
           git clone https://github.com/JonathanSalwan/Triton "${{ env.TRITON_SRC_DIR }}"
+
+          # Prefer tag v0.9; if it fails, pin a commit SHA instead.
           git -C "${{ env.TRITON_SRC_DIR }}" checkout v0.9
           git -C "${{ env.TRITON_SRC_DIR }}" rev-parse HEAD
 
