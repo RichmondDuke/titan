@@ -44,7 +44,6 @@ jobs:
         run: |
           set -euo pipefail
           conda info
-          # Build with MSVC cl.exe, avoid clang/cl mixing
           conda install -y "llvmdev=15.*" "lld=15.*" zlib libxml2 cmake ninja
           echo "$CONDA_PREFIX/Library/bin" >> "$GITHUB_PATH"
 
@@ -78,18 +77,23 @@ jobs:
       - name: Install Triton deps (Z3 + Capstone) and export include/lib paths (Conan JSON)
         shell: pwsh
         run: |
-          $refs = @(
-            "z3/${{ env.Z3_VERSION }}",
-            "capstone/${{ env.CAPSTONE_VERSION }}"
-          )
-
+          $z3Ref = "z3/${{ env.Z3_VERSION }}"
+          $capRef = "capstone/${{ env.CAPSTONE_VERSION }}"
           $jsonPath = Join-Path $env:RUNNER_TEMP "conan-triton-deps.json"
 
-          # Install both deps in one go and emit JSON graph
-          conan install --requires=$refs -s build_type=Release -b missing --format=json | Out-File -FilePath $jsonPath -Encoding utf8
-          $j = Get-Content $jsonPath -Raw | ConvertFrom-Json
+          # IMPORTANT: pass --requires twice (PowerShell arrays otherwise become a single space-separated string)
+          conan install `
+            --requires="$z3Ref" `
+            --requires="$capRef" `
+            -s build_type=Release `
+            -b missing `
+            --format=json | Out-File -FilePath $jsonPath -Encoding utf8
 
+          $j = Get-Content $jsonPath -Raw | ConvertFrom-Json
           if (-not $j.graph -or -not $j.graph.nodes) {
+            Write-Host "Conan JSON did not include graph.nodes. First 2000 chars:"
+            $raw = Get-Content $jsonPath -Raw
+            Write-Host $raw.Substring(0, [Math]::Min(2000, $raw.Length))
             throw "Unexpected Conan JSON: missing graph.nodes"
           }
 
@@ -132,22 +136,13 @@ jobs:
           $capInc = Join-Path $capFolder "include"
           $capLibDir = Join-Path $capFolder "lib"
 
-          # Capstone headers are typically under include/capstone/capstone.h
           $capHdr = Join-Path $capInc "capstone\capstone.h"
-          if (!(Test-Path $capHdr)) {
-            Write-Host ("Listing include dir {0}:" -f $capInc)
-            Get-ChildItem -Force -Path $capInc -Recurse -Depth 3 -ErrorAction SilentlyContinue | Select-Object FullName | Select-Object -First 80
-            throw "capstone.h not found under $capInc"
-          }
+          if (!(Test-Path $capHdr)) { throw "capstone.h not found under $capInc" }
 
           $capLib = Get-ChildItem -Path $capLibDir -Filter "*.lib" -File -ErrorAction SilentlyContinue |
                     Where-Object { $_.Name -match 'capstone|cs' } |
                     Select-Object -First 1
-          if (-not $capLib) {
-            Write-Host ("Listing lib dir {0}:" -f $capLibDir)
-            Get-ChildItem -Force -Path $capLibDir -ErrorAction SilentlyContinue | Select-Object FullName
-            throw "No capstone .lib found under $capLibDir"
-          }
+          if (-not $capLib) { throw "No capstone .lib found under $capLibDir" }
 
           "CAPSTONE_INCLUDE_DIR=$capInc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CAPSTONE_LIBRARY=$($capLib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
