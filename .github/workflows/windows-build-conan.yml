@@ -234,10 +234,10 @@ jobs:
           print(f"Patch 1 done: {ext_hpp}")
 
           # ── Patch 2: libtriton/CMakeLists.txt ────────────────────────────────
+          # 只删除 if(PYTHON_BINDINGS)...endif() 块
+          # 注意：不再修改 install() 规则，因为我们改用静态库编译
           lib_cml = pathlib.Path("_deps/triton-src/src/libtriton/CMakeLists.txt")
           text = lib_cml.read_text(encoding="utf-8")
-
-          # 2a: 删 PYTHON_BINDINGS 块
           lines = text.splitlines(keepends=True)
           result = []
           skip_depth = 0
@@ -253,26 +253,18 @@ jobs:
                       skip_depth += 1
                   elif re.match(r'endif\s*\(', stripped, re.IGNORECASE):
                       skip_depth -= 1
-          text = "".join(result)
-
-          # 2b: 追加 RUNTIME DESTINATION bin
-          text = re.sub(
-              r'(install\s*\(\s*\n\s*TARGETS\s+triton\b.*?)(LIBRARY\s+DESTINATION\s+lib)',
-              r'\1LIBRARY DESTINATION lib\n    RUNTIME DESTINATION bin',
-              text, flags=re.DOTALL
-          )
-
-          lib_cml.write_text(text, encoding="utf-8")
+          lib_cml.write_text("".join(result), encoding="utf-8")
           print(f"Patch 2 done: {lib_cml}")
 
           # ── Patch 3: top-level CMakeLists.txt ────────────────────────────────
           top_cml = pathlib.Path("_deps/triton-src/CMakeLists.txt")
           top_text = top_cml.read_text(encoding="utf-8")
           inject = (
-              "\n# --- CI PATCH: disable Python bindings ---\n"
+              "\n# --- CI PATCH: disable Python bindings, force static lib ---\n"
               'set(PYTHON_BINDINGS OFF CACHE BOOL "" FORCE)\n'
               'set(WITH_PYTHON_BINDINGS OFF CACHE BOOL "" FORCE)\n'
-              "# ------------------------------------------\n"
+              'set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)\n'
+              "# ----------------------------------------------------------\n"
           )
           top_text = re.sub(
               r'(cmake_minimum_required\s*\([^)]*\))',
@@ -282,7 +274,7 @@ jobs:
           print(f"Patch 3 done: {top_cml}")
           sys.exit(0)
 
-      - name: Configure Triton (MSVC; explicit Z3+Capstone; LLVM from conda)
+      - name: Configure Triton (MSVC; static lib; explicit Z3+Capstone; LLVM from conda)
         shell: pwsh
         run: |
           $src = "_deps\triton-src"
@@ -300,6 +292,7 @@ jobs:
             -DBoost_NO_SYSTEM_PATHS=ON `
             -DPYTHON_BINDINGS=OFF `
             -DWITH_PYTHON_BINDINGS=OFF `
+            -DBUILD_SHARED_LIBS=OFF `
             -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
 
       - name: Build & install Triton
@@ -311,32 +304,15 @@ jobs:
           cmake --install "_deps\triton-build" --config Release
           if ($LASTEXITCODE -ne 0) { throw "Triton install failed" }
 
-          # 验证 tritonConfig.cmake 存在
+          # 验证 tritonConfig.cmake 和 triton.lib（静态库）均已安装
           if (!(Test-Path "$env:TRITON_INSTALL_DIR\lib\cmake\triton\tritonConfig.cmake")) {
             throw "tritonConfig.cmake not found after install"
           }
-
-          # 验证 DLL 已安装
-          $tritonDll = Get-ChildItem "$env:TRITON_INSTALL_DIR\bin" -Filter "triton.dll" -ErrorAction SilentlyContinue |
-                       Select-Object -First 1
-          if (-not $tritonDll) { throw "triton.dll not found under $env:TRITON_INSTALL_DIR\bin" }
-          Write-Host "triton.dll installed: $($tritonDll.FullName)"
-
-          # MSVC 编译 DLL 时 import lib (triton.lib) 生成在构建目录，未被 cmake --install 安装
-          # 将其手动复制到 install 目录的 lib/ 下，供后续链接使用
-          $buildImportLib = Get-ChildItem "_deps\triton-build" -Recurse -Filter "triton.lib" -ErrorAction SilentlyContinue |
-                            Select-Object -First 1
-          if ($buildImportLib) {
-            $destLib = "$env:TRITON_INSTALL_DIR\lib\triton.lib"
-            Copy-Item $buildImportLib.FullName $destLib -Force
-            Write-Host "Copied import lib: $($buildImportLib.FullName) -> $destLib"
-          } else {
-            Write-Host "WARNING: triton.lib not found in build dir, linking may fail"
+          if (!(Test-Path "$env:TRITON_INSTALL_DIR\lib\triton.lib")) {
+            throw "triton.lib not found after install"
           }
-
-          # 将 bin 目录加入 PATH，使后续步骤能找到 triton.dll
-          "$env:TRITON_INSTALL_DIR\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          Write-Host "Triton installed OK."
+          Write-Host "Triton static lib installed OK:"
+          Write-Host "  $env:TRITON_INSTALL_DIR\lib\triton.lib"
 
       - name: Configure titan (CMake)
         shell: pwsh
