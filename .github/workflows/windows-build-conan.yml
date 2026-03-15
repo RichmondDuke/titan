@@ -154,6 +154,10 @@ jobs:
           Write-Host "Z3_INCLUDE_DIR=$z3Inc"
           Write-Host "Z3_LIBRARY=$($z3Lib.FullName)"
 
+          # Z3 bin 目录（存放 z3.dll）
+          $z3Bin = Join-Path $z3Folder "bin"
+          "Z3_BIN_DIR=$z3Bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
           # ---- Capstone ----
           $capFolder = Get-PackageFolder "capstone/"
           if (-not $capFolder) { throw "Failed to resolve capstone package folder from Conan JSON" }
@@ -173,6 +177,10 @@ jobs:
           "CAPSTONE_LIBRARY=$($capLib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "CAPSTONE_INCLUDE_DIR=$capInc"
           Write-Host "CAPSTONE_LIBRARY=$($capLib.FullName)"
+
+          # Capstone bin 目录（存放 capstone.dll）
+          $capBin = Join-Path $capFolder "bin"
+          "CAPSTONE_BIN_DIR=$capBin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Clone Triton source
         shell: pwsh
@@ -286,10 +294,48 @@ jobs:
         run: |
           cmake --build "$env:BUILD_DIR" --config Release --target titan --parallel
 
+      - name: Collect runtime DLLs
+        shell: pwsh
+        run: |
+          $dist = "dist"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+
+          # 1. titan.exe 本体
+          $exe = if (Test-Path "build\Release\titan.exe") { "build\Release\titan.exe" } else { "build\titan.exe" }
+          Copy-Item $exe $dist
+
+          # 2. 用 dumpbin 列出 titan.exe 直接依赖的 DLL 名称
+          $needed = dumpbin /dependents $exe |
+            Select-String '^\s+\S+\.dll' |
+            ForEach-Object { $_.ToString().Trim().ToLower() }
+          Write-Host "DLLs needed by titan.exe:"
+          $needed | ForEach-Object { Write-Host "  $_" }
+
+          # 3. 搜索路径：Conan 包 bin 目录 + conda Library\bin
+          $searchDirs = @(
+            "$env:Z3_BIN_DIR",
+            "$env:CAPSTONE_BIN_DIR",
+            "$env:CONDA_PREFIX\Library\bin"
+          ) | Where-Object { $_ -and (Test-Path $_) }
+
+          # 4. 对每个依赖 DLL，在搜索路径中查找并复制
+          foreach ($dll in $needed) {
+            foreach ($dir in $searchDirs) {
+              $candidate = Join-Path $dir $dll
+              if (Test-Path $candidate) {
+                Write-Host "Copying $candidate -> $dist"
+                Copy-Item $candidate $dist -Force
+                break
+              }
+            }
+          }
+
+          # 5. 列出 dist 目录内容
+          Write-Host "=== dist contents ==="
+          Get-ChildItem $dist | ForEach-Object { Write-Host "  $($_.Name)" }
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: titan-windows-release
-          path: |
-            build/titan.exe
-            build/Release/titan.exe
+          path: dist/
