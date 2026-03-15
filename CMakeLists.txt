@@ -36,9 +36,12 @@ endif()
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_20)
 
 # Link LLVM libs needed by this project
-# 注意 LLVM 15 的组件名变化：
-#   Scalar  → ScalarOpts（LLVM 15 重命名，LLVMScalar.lib 已不存在）
-#   TargetParser 在 LLVM 15 中已合并进 Support，不单独列
+# LLVM 15 组件名说明：
+#   Scalar       → ScalarOpts   (LLVM 15 重命名)
+#   CFLAliasAnalysis             (LLVM 15 已删除，功能并入 Analysis)
+#   ObjCARC                      (LLVM 15 已删除，功能并入 IPO/Passes)
+#   Coroutines                   (LLVM 15 已删除，功能并入 Passes)
+#   TargetParser                 (LLVM 15 已合并进 Support，不单独存在)
 llvm_map_components_to_libnames(LLVM_LIBS
   Support
   Option
@@ -49,18 +52,13 @@ llvm_map_components_to_libnames(LLVM_LIBS
   MC
   MCParser
   Remarks
-  # passes & analysis
   Analysis
   Passes
   TransformUtils
   InstCombine
-  ScalarOpts       # LLVM 15: 原来的 Scalar 改名为 ScalarOpts
+  ScalarOpts
   Vectorize
   IPO
-  CFLAliasAnalysis
-  Coroutines
-  ObjCARC
-  # target info (PassBuilder 需要)
   Target
 )
 
