@@ -22,6 +22,11 @@ add_executable(${PROJECT_NAME} ${TITAN_SOURCES} ${TITAN_INCLUDES})
 target_include_directories(${PROJECT_NAME} PRIVATE
   "src/"
   ${LLVM_INCLUDE_DIRS}
+  # Triton and Boost headers: tritonTargets.cmake uses $<INSTALL_INTERFACE:include>
+  # which does not propagate correctly on Windows when using MSVC static builds.
+  # Pass these via -DTRITON_INCLUDE_DIR and -DBOOST_INCLUDE_DIR from the CI workflow.
+  $<$<BOOL:${TRITON_INCLUDE_DIR}>:${TRITON_INCLUDE_DIR}>
+  $<$<BOOL:${BOOST_INCLUDE_DIR}>:${BOOST_INCLUDE_DIR}>
 )
 
 if(LLVM_DEFINITIONS)
