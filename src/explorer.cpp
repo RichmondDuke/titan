@@ -214,8 +214,10 @@ void Explorer::operator()(vm::Exit&& insn)
 
     auto args = lifter->get_return_args(slice);
 
-    args.program_counter()->dump();
-    args.return_address()->dump();
+    // dump() 在 conda LLVM Release 包中不存在（需要 LLVM_ENABLE_DUMP=ON 编译）
+    // 改用 print(llvm::errs()) 替代，所有构建配置下均可用
+    args.program_counter()->print(llvm::errs()); llvm::errs() << "\n";
+    args.return_address()->print(llvm::errs()); llvm::errs() << "\n";
     // NOTE: This is not tested and probably wrong.
     //
     if (auto load = llvm::dyn_cast<llvm::LoadInst>(args.program_counter()))
