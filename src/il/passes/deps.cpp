@@ -5,6 +5,7 @@
 #include <llvm/Analysis/ScalarEvolution.h>
 #include <llvm/Analysis/MemoryDependenceAnalysis.h>
 #include <llvm/Analysis/ScalarEvolutionAliasAnalysis.h>
+#include <llvm/Support/raw_ostream.h>
 
 llvm::PreservedAnalyses MemoryDependenciesPass::run(llvm::Function& fn, llvm::FunctionAnalysisManager& am)
 {
@@ -20,13 +21,13 @@ llvm::PreservedAnalyses MemoryDependenciesPass::run(llvm::Function& fn, llvm::Fu
                 if (insn)
                 {
                     logger::debug("memory dependence:");
-                    store->dump();
-                    insn->dump();
+                    store->print(llvm::errs()); llvm::errs() << "\n";
+                    insn->print(llvm::errs()); llvm::errs() << "\n";
                 }
                 else
                 {
                     logger::debug("no memory dependence:");
-                    store->dump();
+                    store->print(llvm::errs()); llvm::errs() << "\n";
                 }
             }
         }
