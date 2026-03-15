@@ -9,6 +9,7 @@
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/PassManager.h>
 #include <llvm/Analysis/ScalarEvolutionExpressions.h>
+#include <llvm/Support/raw_ostream.h>
 
 llvm::Type* get_integer_type(int size, llvm::LLVMContext& context)
 {
@@ -132,8 +133,8 @@ llvm::PreservedAnalyses MemoryCoalescingPass::run(llvm::Function& fn, llvm::Func
                     if (store1.offset() + store1.size() == store0.offset())
                     {
                         logger::debug("Found two sequential stores {} {}:", store0.offset(), store1.offset());
-                        insn0->dump();
-                        insn1->dump();
+                        insn0->print(llvm::errs()); llvm::errs() << "\n";
+                        insn1->print(llvm::errs()); llvm::errs() << "\n";
                         llvm::IRBuilder<> ir(insn1->getNextNode());
                         auto op0_zext  = ir.CreateZExt(insn0->getValueOperand(), ir.getIntNTy(store0.size() * 8 * 2));
                         auto op1_zext  = ir.CreateZExt(insn1->getValueOperand(), ir.getIntNTy(store1.size() * 8 * 2));
