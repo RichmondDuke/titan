@@ -4,6 +4,7 @@
 #include <llvm/IR/Instruction.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/PatternMatch.h>
+#include <llvm/Support/raw_ostream.h>
 
 using namespace llvm::PatternMatch;
 
@@ -82,7 +83,7 @@ pointer_t get_pointer_type(const llvm::Value* ptr)
                         if (!name.startswith("llvm.ctpop") && !name.startswith("llvm.fshr") && !name.startswith("llvm.fshl"))
                         {
                             logger::warn("unknown pointer call instruction:");
-                            value->dump();
+                            value->print(llvm::errs()); llvm::errs() << "\n";
                             return pointer_t::unknown;
                         }
                     }
@@ -95,7 +96,7 @@ pointer_t get_pointer_type(const llvm::Value* ptr)
                         && !llvm::isa<llvm::PHINode>(value))
                     {
                         logger::warn("unknown instruction:");
-                        value->dump();
+                        value->print(llvm::errs()); llvm::errs() << "\n";
                         return pointer_t::unknown;
                     }
 
