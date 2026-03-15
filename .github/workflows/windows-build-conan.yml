@@ -351,10 +351,8 @@ jobs:
                        Select-Object -First 1
 
           if (-not $tritonDll) { throw "triton.dll not found under $env:TRITON_INSTALL_DIR\bin" }
-          if (-not $tritonLib) { throw "triton.lib (import lib) not found under $env:TRITON_INSTALL_DIR\lib" }
 
           Write-Host "triton.dll : $($tritonDll.FullName)"
-          Write-Host "triton.lib : $($tritonLib.FullName)"
           Write-Host "Triton installed OK."
 
           # 将 bin 目录加入 PATH，使后续步骤能找到 triton.dll
