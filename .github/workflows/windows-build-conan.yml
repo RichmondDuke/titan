@@ -12,9 +12,9 @@ jobs:
     env:
       BUILD_DIR: build
       Z3_VERSION: "4.12.2"
-      CAPSTONE_VERSION: "4.0.2"
+      CAPSTONE_VERSION: "5.0.1"
       # context.hpp 在 Triton v0.10+ 才存在，v0.9 没有该文件
-      # 使用 master 分支以获取最新稳定 API
+      # riscv.h 在 capstone 5.x 才存在，需要 capstone 5.0.1+
       TRITON_GIT_REF: "master"
 
     steps:
@@ -162,6 +162,10 @@ jobs:
           if (!(Test-Path (Join-Path $capInc "capstone\capstone.h"))) {
             throw "capstone/capstone.h not found under $capInc"
           }
+          # 验证 riscv.h 存在（capstone 5.x 特性，Triton master 需要）
+          if (!(Test-Path (Join-Path $capInc "capstone\riscv.h"))) {
+            throw "capstone/riscv.h not found — need capstone 5.x, got a 4.x package?"
+          }
           $capLib = Get-ChildItem -Path $capLibDir -Filter "*.lib" -File -ErrorAction SilentlyContinue |
                     Where-Object { $_.Name -match 'capstone|cs' } | Select-Object -First 1
           if (-not $capLib) { throw "No capstone .lib found under $capLibDir" }
@@ -177,9 +181,8 @@ jobs:
           git clone https://github.com/JonathanSalwan/Triton "_deps\triton-src"
           git -C "_deps\triton-src" checkout "${{ env.TRITON_GIT_REF }}"
           git -C "_deps\triton-src" rev-parse HEAD
-          # 验证 context.hpp 存在（v0.9 没有此文件）
           if (!(Test-Path "_deps\triton-src\src\libtriton\includes\triton\context.hpp")) {
-            throw "context.hpp not found in checked-out Triton. Likely wrong version (v0.9 does not have context.hpp)."
+            throw "context.hpp not found — wrong Triton version"
           }
           Write-Host "context.hpp confirmed present."
 
@@ -188,39 +191,11 @@ jobs:
         run: |
           import re, pathlib, sys
 
-          # ── Patch 1: externalLibs.hpp — 修复 Windows 下 capstone include 路径 ──
-          ext_hpp = pathlib.Path(
-              "_deps/triton-src/src/libtriton/includes/triton/externalLibs.hpp"
-          )
-          ext_text = ext_hpp.read_text(encoding="utf-8")
-          new_win_block = (
-              "#elif _WIN32\n"
-              "        #include <capstone/arm64.h>\n"
-              "        #include <capstone/arm.h>\n"
-              "        #include <capstone/capstone.h>\n"
-              "        #include <capstone/x86.h>"
-          )
-          ext_patched = re.sub(
-              r'#elif\s+_WIN32\s*\n\s*#include\s*<capstone\.h>',
-              new_win_block, ext_text
-          )
-          if ext_patched == ext_text:
-              lines = ext_text.splitlines(keepends=True)
-              out, i = [], 0
-              while i < len(lines):
-                  if '_WIN32' in lines[i] and i+1 < len(lines) and 'capstone.h' in lines[i+1]:
-                      out.append(lines[i])
-                      out.append('        #include <capstone/arm64.h>\n')
-                      out.append('        #include <capstone/arm.h>\n')
-                      out.append('        #include <capstone/capstone.h>\n')
-                      out.append('        #include <capstone/x86.h>\n')
-                      i += 2; continue
-                  out.append(lines[i]); i += 1
-              ext_patched = "".join(out)
-          ext_hpp.write_text(ext_patched, encoding="utf-8")
-          print(f"Patch 1 done: {ext_hpp}")
+          # Triton master 的 externalLibs.hpp 已经不区分平台，
+          # 直接 include <capstone/arm.h> 等，无需 Patch 1。
+          # 只需禁用 Python bindings 并强制静态库。
 
-          # ── Patch 2: libtriton/CMakeLists.txt — 删 PYTHON_BINDINGS 块 ─────────
+          # ── Patch 1: libtriton/CMakeLists.txt — 删 PYTHON_BINDINGS 块 ─────────
           lib_cml = pathlib.Path("_deps/triton-src/src/libtriton/CMakeLists.txt")
           text = lib_cml.read_text(encoding="utf-8")
           lines = text.splitlines(keepends=True)
@@ -235,9 +210,9 @@ jobs:
                   if re.match(r'if\s*\(', stripped, re.IGNORECASE): skip_depth += 1
                   elif re.match(r'endif\s*\(', stripped, re.IGNORECASE): skip_depth -= 1
           lib_cml.write_text("".join(result), encoding="utf-8")
-          print(f"Patch 2 done: {lib_cml}")
+          print(f"Patch 1 done: {lib_cml}")
 
-          # ── Patch 3: top-level CMakeLists.txt ────────────────────────────────
+          # ── Patch 2: top-level CMakeLists.txt ────────────────────────────────
           top_cml = pathlib.Path("_deps/triton-src/CMakeLists.txt")
           top_text = top_cml.read_text(encoding="utf-8")
           inject = (
@@ -249,7 +224,7 @@ jobs:
           )
           top_text = re.sub(r'(cmake_minimum_required\s*\([^)]*\))', r'\1' + inject, top_text)
           top_cml.write_text(top_text, encoding="utf-8")
-          print(f"Patch 3 done: {top_cml}")
+          print(f"Patch 2 done: {top_cml}")
           sys.exit(0)
 
       - name: Configure Triton (MSVC; static lib; explicit Z3+Capstone; LLVM from conda)
