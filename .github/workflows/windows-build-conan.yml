@@ -106,8 +106,10 @@ jobs:
             throw "boost/version.hpp not found under $boostInc"
           }
 
-          "BOOST_ROOT=$boostFolder" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BOOST_ROOT=$boostFolder"       | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BOOST_INCLUDE_DIR=$boostInc"   | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "BOOST_ROOT=$boostFolder"
+          Write-Host "BOOST_INCLUDE_DIR=$boostInc"
 
       - name: Install Triton deps (Z3 + Capstone) and export include/lib paths (Conan JSON)
         shell: pwsh
@@ -159,7 +161,6 @@ jobs:
 
           "Z3_INCLUDE_DIR=$z3Inc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "Z3_LIBRARY=$($z3Lib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
           Write-Host ("Z3_INCLUDE_DIR={0}" -f $z3Inc)
           Write-Host ("Z3_LIBRARY={0}" -f $z3Lib.FullName)
 
@@ -181,7 +182,6 @@ jobs:
 
           "CAPSTONE_INCLUDE_DIR=$capInc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CAPSTONE_LIBRARY=$($capLib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
           Write-Host ("CAPSTONE_INCLUDE_DIR={0}" -f $capInc)
           Write-Host ("CAPSTONE_LIBRARY={0}" -f $capLib.FullName)
 
@@ -234,8 +234,6 @@ jobs:
           print(f"Patch 1 done: {ext_hpp}")
 
           # ── Patch 2: libtriton/CMakeLists.txt ────────────────────────────────
-          # 只删除 if(PYTHON_BINDINGS)...endif() 块
-          # 注意：不再修改 install() 规则，因为我们改用静态库编译
           lib_cml = pathlib.Path("_deps/triton-src/src/libtriton/CMakeLists.txt")
           text = lib_cml.read_text(encoding="utf-8")
           lines = text.splitlines(keepends=True)
@@ -304,15 +302,13 @@ jobs:
           cmake --install "_deps\triton-build" --config Release
           if ($LASTEXITCODE -ne 0) { throw "Triton install failed" }
 
-          # 验证 tritonConfig.cmake 和 triton.lib（静态库）均已安装
           if (!(Test-Path "$env:TRITON_INSTALL_DIR\lib\cmake\triton\tritonConfig.cmake")) {
             throw "tritonConfig.cmake not found after install"
           }
           if (!(Test-Path "$env:TRITON_INSTALL_DIR\lib\triton.lib")) {
             throw "triton.lib not found after install"
           }
-          Write-Host "Triton static lib installed OK:"
-          Write-Host "  $env:TRITON_INSTALL_DIR\lib\triton.lib"
+          Write-Host "Triton static lib installed OK: $env:TRITON_INSTALL_DIR\lib\triton.lib"
 
       - name: Configure titan (CMake)
         shell: pwsh
@@ -322,11 +318,20 @@ jobs:
           if (-not $toolchain) { throw "conan_toolchain.cmake not found under $env:BUILD_DIR\conan" }
           $conanGen = $toolchain.DirectoryName
 
-          $prefixPath = "$conanGen;$env:CONDA_PREFIX\Library;$env:TRITON_INSTALL_DIR"
+          # triton::triton 的 INTERFACE_INCLUDE_DIRECTORIES 里有 Boost/Triton/Capstone/Z3 include 路径，
+          # 但 Triton v0.9 的 tritonTargets.cmake 使用 $<INSTALL_INTERFACE:include>，
+          # 展开后是相对路径，需要 CMAKE_PREFIX_PATH 中包含 TRITON_INSTALL_DIR 才能正确解析。
+          # 另外 Boost header-only 包的 include 路径需要显式追加到 CMAKE_PREFIX_PATH。
+          $prefixPath = "$conanGen;$env:CONDA_PREFIX\Library;$env:TRITON_INSTALL_DIR;$env:BOOST_ROOT"
+
+          # TRITON_INCLUDE_DIR 和 BOOST_INCLUDE_DIR 通过 CMAKE_INCLUDE_PATH 兜底，
+          # 保证即使 tritonTargets 没有正确传播，编译也能找到头文件。
+          $includePath = "$env:TRITON_INSTALL_DIR\include;$env:BOOST_INCLUDE_DIR"
 
           cmake -S . -B "$env:BUILD_DIR" -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
             -DCMAKE_PREFIX_PATH="$prefixPath" `
+            -DCMAKE_INCLUDE_PATH="$includePath" `
             -DLLVM_DIR="$env:LLVM_DIR" `
             -Dtriton_DIR="$env:TRITON_INSTALL_DIR\lib\cmake\triton" `
             -DTITAN_BUILD_INTRINSICS=OFF `
