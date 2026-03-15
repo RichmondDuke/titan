@@ -33,9 +33,25 @@ if(LLVM_DEFINITIONS)
   target_compile_definitions(${PROJECT_NAME} PRIVATE ${LLVM_DEFINITIONS})
 endif()
 
+# llvm::Value::dump() 只在定义 LLVM_ENABLE_DUMP 时存在于 Release 库中
+# conda llvmdev Release 包没有 dump()，需要定义此宏或在代码里用条件编译
+# 这里先加宏尝试，如果 conda 包确实没编译进去则需要修改源码绕过
+target_compile_definitions(${PROJECT_NAME} PRIVATE LLVM_ENABLE_DUMP)
+
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_20)
 
 # Link LLVM libs needed by this project
+# 完整列出所有用到的组件：
+#   Core/Support/IRReader: 基础IR操作
+#   Analysis: AAResults, MemorySSA, ScalarEvolution, MemoryDependence, BasicAA 等
+#   Passes: PassBuilder, PipelineTuningOptions, OptimizationLevel
+#   TransformUtils: CloneFunction, LCSSA, LoopSimplify
+#   InstCombine: instcombine pass
+#   Vectorize: loop vectorizer
+#   CFLAliasAnalysis: CFLAndersAA / CFLSteensAA
+#   Scalar: LoopRotate, FunctionToLoopPassAdaptor 等 scalar passes
+#   IPO: InlineFunction, 过程间优化
+#   Coroutines/ObjCARC: PassBuilder 内部依赖
 llvm_map_components_to_libnames(LLVM_LIBS
   Support
   Option
@@ -46,6 +62,20 @@ llvm_map_components_to_libnames(LLVM_LIBS
   MC
   MCParser
   Remarks
+  # passes & analysis
+  Analysis
+  Passes
+  TransformUtils
+  InstCombine
+  Scalar
+  Vectorize
+  IPO
+  CFLAliasAnalysis
+  Coroutines
+  ObjCARC
+  # target info (PassBuilder 需要)
+  Target
+  TargetParser
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
