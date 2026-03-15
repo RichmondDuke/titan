@@ -201,7 +201,6 @@ jobs:
           # ── Patch 1: externalLibs.hpp ─────────────────────────────────────────
           # Triton v0.9 在 Windows 上用 #include <capstone.h>（无子目录），
           # 但 Conan capstone 4.x 头文件在 include/capstone/ 子目录下。
-          # 改成与 Unix 分支一致的带子目录路径。
           ext_hpp = pathlib.Path(
               "_deps/triton-src/src/libtriton/includes/triton/externalLibs.hpp"
           )
@@ -215,11 +214,9 @@ jobs:
           )
           ext_patched = re.sub(
               r'#elif\s+_WIN32\s*\n\s*#include\s*<capstone\.h>',
-              new_win_block,
-              ext_text
+              new_win_block, ext_text
           )
           if ext_patched == ext_text:
-              print("WARNING: externalLibs.hpp pattern not matched, trying literal replace")
               lines = ext_text.splitlines(keepends=True)
               out = []
               i = 0
@@ -236,16 +233,16 @@ jobs:
                   i += 1
               ext_patched = "".join(out)
           ext_hpp.write_text(ext_patched, encoding="utf-8")
-          print(f"Patched {ext_hpp}")
-          for line in ext_patched.splitlines():
-              if 'capstone' in line or '_WIN32' in line or '__unix__' in line:
-                  print(f"    {line}")
+          print(f"Patch 1 done: {ext_hpp}")
 
           # ── Patch 2: libtriton/CMakeLists.txt ────────────────────────────────
-          # 只删除 if(PYTHON_BINDINGS)...endif() 块（bindings/python/*.cpp 依赖 longintrepr.h）
-          # liftingToPython.cpp 和 astPythonRepresentation.cpp 是纯 C++，保留。
+          # 2a) 删除 if(PYTHON_BINDINGS)...endif() 块
+          # 2b) 在 install(TARGETS triton ...) 中追加 RUNTIME DESTINATION bin
+          #     使 Windows DLL 和 import lib (.lib) 都被安装
           lib_cml = pathlib.Path("_deps/triton-src/src/libtriton/CMakeLists.txt")
           text = lib_cml.read_text(encoding="utf-8")
+
+          # 2a: 删 PYTHON_BINDINGS 块
           lines = text.splitlines(keepends=True)
           result = []
           skip_depth = 0
@@ -261,8 +258,34 @@ jobs:
                       skip_depth += 1
                   elif re.match(r'endif\s*\(', stripped, re.IGNORECASE):
                       skip_depth -= 1
-          lib_cml.write_text("".join(result), encoding="utf-8")
-          print(f"Patched {lib_cml}: removed if(PYTHON_BINDINGS) block only")
+          text = "".join(result)
+
+          # 2b: 在 install(TARGETS triton ...) 块里追加 RUNTIME DESTINATION bin
+          # 原始内容（v0.9）：
+          #   install(
+          #       TARGETS triton
+          #       EXPORT tritonTargets
+          #       PUBLIC_HEADER DESTINATION include/triton
+          #       INCLUDES DESTINATION include
+          #       ARCHIVE DESTINATION lib
+          #       LIBRARY DESTINATION lib
+          #   )
+          # Windows DLL 是 RUNTIME 类型，缺少此行导致 DLL 和 import lib 均未安装。
+          text = re.sub(
+              r'(install\s*\(\s*\n\s*TARGETS\s+triton\b.*?)(LIBRARY\s+DESTINATION\s+lib)',
+              r'\1LIBRARY DESTINATION lib\n    RUNTIME DESTINATION bin',
+              text,
+              flags=re.DOTALL
+          )
+
+          lib_cml.write_text(text, encoding="utf-8")
+          print(f"Patch 2 done: {lib_cml}")
+          # 验证补丁生效
+          patched_content = lib_cml.read_text(encoding="utf-8")
+          if "RUNTIME DESTINATION bin" in patched_content:
+              print("  RUNTIME DESTINATION bin patch confirmed")
+          else:
+              print("  WARNING: RUNTIME DESTINATION patch may not have applied!")
 
           # ── Patch 3: top-level CMakeLists.txt ────────────────────────────────
           top_cml = pathlib.Path("_deps/triton-src/CMakeLists.txt")
@@ -275,11 +298,10 @@ jobs:
           )
           top_text = re.sub(
               r'(cmake_minimum_required\s*\([^)]*\))',
-              r'\1' + inject,
-              top_text
+              r'\1' + inject, top_text
           )
           top_cml.write_text(top_text, encoding="utf-8")
-          print(f"Patched {top_cml}")
+          print(f"Patch 3 done: {top_cml}")
           sys.exit(0)
 
       - name: Configure Triton (MSVC; explicit Z3+Capstone; LLVM from conda)
@@ -311,34 +333,32 @@ jobs:
           cmake --install "_deps\triton-build" --config Release
           if ($LASTEXITCODE -ne 0) { throw "Triton install failed" }
 
-          # 验证 tritonConfig.cmake 存在（必须）
+          # 验证 tritonConfig.cmake 存在
           if (!(Test-Path "$env:TRITON_INSTALL_DIR\lib\cmake\triton\tritonConfig.cmake")) {
             throw "tritonConfig.cmake not found after install"
           }
 
-          # 打印安装目录内容便于调试，并找到 triton 库文件（.lib 或 .dll）
-          Write-Host "=== TRITON_INSTALL_DIR\lib contents ==="
-          Get-ChildItem "$env:TRITON_INSTALL_DIR\lib" -Recurse | ForEach-Object { Write-Host "  $($_.FullName)" }
-
-          # 找 triton 的链接库文件（import lib 或静态 lib）
-          # MSVC DLL 模式: triton.lib 是 import lib，安装到 lib/
-          # 如果找不到 .lib，找 .dll（纯 DLL 安装）
-          $tritonLib = Get-ChildItem "$env:TRITON_INSTALL_DIR" -Recurse -Filter "triton.lib" -ErrorAction SilentlyContinue |
-                       Select-Object -First 1
-          if ($tritonLib) {
-            Write-Host "Found triton lib: $($tritonLib.FullName)"
-            "TRITON_LIB=$($tritonLib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          } else {
-            # 找 DLL
-            $tritonDll = Get-ChildItem "$env:TRITON_INSTALL_DIR" -Recurse -Filter "triton.dll" -ErrorAction SilentlyContinue |
-                         Select-Object -First 1
-            if ($tritonDll) {
-              Write-Host "Found triton dll: $($tritonDll.FullName)"
-            } else {
-              throw "Neither triton.lib nor triton.dll found under $env:TRITON_INSTALL_DIR"
-            }
+          # 打印安装目录全部内容
+          Write-Host "=== Triton install tree ==="
+          Get-ChildItem "$env:TRITON_INSTALL_DIR" -Recurse | ForEach-Object {
+            Write-Host "  $($_.FullName)"
           }
+
+          # 验证 DLL 和 import lib 都已安装
+          $tritonDll = Get-ChildItem "$env:TRITON_INSTALL_DIR\bin" -Filter "triton.dll" -ErrorAction SilentlyContinue |
+                       Select-Object -First 1
+          $tritonLib = Get-ChildItem "$env:TRITON_INSTALL_DIR\lib" -Filter "triton.lib" -ErrorAction SilentlyContinue |
+                       Select-Object -First 1
+
+          if (-not $tritonDll) { throw "triton.dll not found under $env:TRITON_INSTALL_DIR\bin" }
+          if (-not $tritonLib) { throw "triton.lib (import lib) not found under $env:TRITON_INSTALL_DIR\lib" }
+
+          Write-Host "triton.dll : $($tritonDll.FullName)"
+          Write-Host "triton.lib : $($tritonLib.FullName)"
           Write-Host "Triton installed OK."
+
+          # 将 bin 目录加入 PATH，使后续步骤能找到 triton.dll
+          "$env:TRITON_INSTALL_DIR\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Configure titan (CMake)
         shell: pwsh
