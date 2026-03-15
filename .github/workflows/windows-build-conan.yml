@@ -106,8 +106,8 @@ jobs:
             throw "boost/version.hpp not found under $boostInc"
           }
 
-          "BOOST_ROOT=$boostFolder"       | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "BOOST_INCLUDE_DIR=$boostInc"   | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BOOST_ROOT=$boostFolder"     | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BOOST_INCLUDE_DIR=$boostInc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "BOOST_ROOT=$boostFolder"
           Write-Host "BOOST_INCLUDE_DIR=$boostInc"
 
@@ -149,41 +149,32 @@ jobs:
           # ---- Z3 ----
           $z3Folder = Get-PackageFolder "z3/"
           if (-not $z3Folder) { throw "Failed to resolve z3 package folder from Conan JSON" }
-
-          $z3Inc = Join-Path $z3Folder "include"
+          $z3Inc    = Join-Path $z3Folder "include"
           $z3LibDir = Join-Path $z3Folder "lib"
           if (!(Test-Path (Join-Path $z3Inc "z3.h"))) { throw "z3.h not found under $z3Inc" }
-
           $z3Lib = Get-ChildItem -Path $z3LibDir -Filter "*.lib" -File -ErrorAction SilentlyContinue |
-                   Where-Object { $_.Name -match 'z3' } |
-                   Select-Object -First 1
+                   Where-Object { $_.Name -match 'z3' } | Select-Object -First 1
           if (-not $z3Lib) { throw "No z3 .lib found under $z3LibDir" }
-
-          "Z3_INCLUDE_DIR=$z3Inc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "Z3_LIBRARY=$($z3Lib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host ("Z3_INCLUDE_DIR={0}" -f $z3Inc)
-          Write-Host ("Z3_LIBRARY={0}" -f $z3Lib.FullName)
+          "Z3_INCLUDE_DIR=$z3Inc"            | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "Z3_LIBRARY=$($z3Lib.FullName)"    | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Z3_INCLUDE_DIR=$z3Inc"
+          Write-Host "Z3_LIBRARY=$($z3Lib.FullName)"
 
           # ---- Capstone ----
           $capFolder = Get-PackageFolder "capstone/"
           if (-not $capFolder) { throw "Failed to resolve capstone package folder from Conan JSON" }
-
-          $capInc = Join-Path $capFolder "include"
+          $capInc    = Join-Path $capFolder "include"
           $capLibDir = Join-Path $capFolder "lib"
-
           if (!(Test-Path (Join-Path $capInc "capstone\capstone.h"))) {
             throw "capstone/capstone.h not found under $capInc"
           }
-
           $capLib = Get-ChildItem -Path $capLibDir -Filter "*.lib" -File -ErrorAction SilentlyContinue |
-                    Where-Object { $_.Name -match 'capstone|cs' } |
-                    Select-Object -First 1
+                    Where-Object { $_.Name -match 'capstone|cs' } | Select-Object -First 1
           if (-not $capLib) { throw "No capstone .lib found under $capLibDir" }
-
-          "CAPSTONE_INCLUDE_DIR=$capInc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CAPSTONE_INCLUDE_DIR=$capInc"         | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CAPSTONE_LIBRARY=$($capLib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host ("CAPSTONE_INCLUDE_DIR={0}" -f $capInc)
-          Write-Host ("CAPSTONE_LIBRARY={0}" -f $capLib.FullName)
+          Write-Host "CAPSTONE_INCLUDE_DIR=$capInc"
+          Write-Host "CAPSTONE_LIBRARY=$($capLib.FullName)"
 
       - name: Clone Triton source
         shell: pwsh
@@ -216,41 +207,34 @@ jobs:
           )
           if ext_patched == ext_text:
               lines = ext_text.splitlines(keepends=True)
-              out = []
-              i = 0
+              out, i = [], 0
               while i < len(lines):
-                  if '_WIN32' in lines[i] and i + 1 < len(lines) and 'capstone.h' in lines[i+1]:
+                  if '_WIN32' in lines[i] and i+1 < len(lines) and 'capstone.h' in lines[i+1]:
                       out.append(lines[i])
                       out.append('        #include <capstone/arm64.h>\n')
                       out.append('        #include <capstone/arm.h>\n')
                       out.append('        #include <capstone/capstone.h>\n')
                       out.append('        #include <capstone/x86.h>\n')
-                      i += 2
-                      continue
-                  out.append(lines[i])
-                  i += 1
+                      i += 2; continue
+                  out.append(lines[i]); i += 1
               ext_patched = "".join(out)
           ext_hpp.write_text(ext_patched, encoding="utf-8")
           print(f"Patch 1 done: {ext_hpp}")
 
-          # ── Patch 2: libtriton/CMakeLists.txt ────────────────────────────────
+          # ── Patch 2: libtriton/CMakeLists.txt — 删 PYTHON_BINDINGS 块 ─────────
           lib_cml = pathlib.Path("_deps/triton-src/src/libtriton/CMakeLists.txt")
           text = lib_cml.read_text(encoding="utf-8")
           lines = text.splitlines(keepends=True)
-          result = []
-          skip_depth = 0
+          result, skip_depth = [], 0
           for line in lines:
               stripped = line.strip()
               if skip_depth == 0:
                   if re.match(r'if\s*\(\s*PYTHON_BINDINGS\s*\)', stripped, re.IGNORECASE):
-                      skip_depth = 1
-                      continue
+                      skip_depth = 1; continue
                   result.append(line)
               else:
-                  if re.match(r'if\s*\(', stripped, re.IGNORECASE):
-                      skip_depth += 1
-                  elif re.match(r'endif\s*\(', stripped, re.IGNORECASE):
-                      skip_depth -= 1
+                  if re.match(r'if\s*\(', stripped, re.IGNORECASE): skip_depth += 1
+                  elif re.match(r'endif\s*\(', stripped, re.IGNORECASE): skip_depth -= 1
           lib_cml.write_text("".join(result), encoding="utf-8")
           print(f"Patch 2 done: {lib_cml}")
 
@@ -264,10 +248,7 @@ jobs:
               'set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)\n'
               "# ----------------------------------------------------------\n"
           )
-          top_text = re.sub(
-              r'(cmake_minimum_required\s*\([^)]*\))',
-              r'\1' + inject, top_text
-          )
+          top_text = re.sub(r'(cmake_minimum_required\s*\([^)]*\))', r'\1' + inject, top_text)
           top_cml.write_text(top_text, encoding="utf-8")
           print(f"Patch 3 done: {top_cml}")
           sys.exit(0)
@@ -275,12 +256,8 @@ jobs:
       - name: Configure Triton (MSVC; static lib; explicit Z3+Capstone; LLVM from conda)
         shell: pwsh
         run: |
-          $src = "_deps\triton-src"
-          $bld = "_deps\triton-build"
-          $inst = "$env:TRITON_INSTALL_DIR"
-
-          cmake -S $src -B $bld -G "Visual Studio 17 2022" -A x64 `
-            -DCMAKE_INSTALL_PREFIX="$inst" `
+          cmake -S "_deps\triton-src" -B "_deps\triton-build" -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_INSTALL_PREFIX="$env:TRITON_INSTALL_DIR" `
             -DLLVM_DIR="$env:LLVM_DIR" `
             -DZ3_INCLUDE_DIR="$env:Z3_INCLUDE_DIR" `
             -DZ3_LIBRARY="$env:Z3_LIBRARY" `
@@ -318,22 +295,19 @@ jobs:
           if (-not $toolchain) { throw "conan_toolchain.cmake not found under $env:BUILD_DIR\conan" }
           $conanGen = $toolchain.DirectoryName
 
-          # triton::triton 的 INTERFACE_INCLUDE_DIRECTORIES 里有 Boost/Triton/Capstone/Z3 include 路径，
-          # 但 Triton v0.9 的 tritonTargets.cmake 使用 $<INSTALL_INTERFACE:include>，
-          # 展开后是相对路径，需要 CMAKE_PREFIX_PATH 中包含 TRITON_INSTALL_DIR 才能正确解析。
-          # 另外 Boost header-only 包的 include 路径需要显式追加到 CMAKE_PREFIX_PATH。
           $prefixPath = "$conanGen;$env:CONDA_PREFIX\Library;$env:TRITON_INSTALL_DIR;$env:BOOST_ROOT"
 
-          # TRITON_INCLUDE_DIR 和 BOOST_INCLUDE_DIR 通过 CMAKE_INCLUDE_PATH 兜底，
-          # 保证即使 tritonTargets 没有正确传播，编译也能找到头文件。
-          $includePath = "$env:TRITON_INSTALL_DIR\include;$env:BOOST_INCLUDE_DIR"
-
+          # TRITON_INCLUDE_DIR / BOOST_INCLUDE_DIR:
+          # 直接传给 CMake 自定义变量，在 CMakeLists.txt 里通过
+          # target_include_directories 追加，解决 tritonTargets.cmake
+          # 无法自动传播 include 路径的问题。
           cmake -S . -B "$env:BUILD_DIR" -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
             -DCMAKE_PREFIX_PATH="$prefixPath" `
-            -DCMAKE_INCLUDE_PATH="$includePath" `
             -DLLVM_DIR="$env:LLVM_DIR" `
             -Dtriton_DIR="$env:TRITON_INSTALL_DIR\lib\cmake\triton" `
+            -DTRITON_INCLUDE_DIR="$env:TRITON_INSTALL_DIR\include" `
+            -DBOOST_INCLUDE_DIR="$env:BOOST_INCLUDE_DIR" `
             -DTITAN_BUILD_INTRINSICS=OFF `
             -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
 
