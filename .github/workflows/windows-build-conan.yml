@@ -13,8 +13,6 @@ jobs:
       BUILD_DIR: build
       Z3_VERSION: "4.12.2"
       CAPSTONE_VERSION: "5.0.1"
-      # context.hpp 在 Triton v0.10+ 才存在，v0.9 没有该文件
-      # riscv.h 在 capstone 5.x 才存在，需要 capstone 5.0.1+
       TRITON_GIT_REF: "master"
 
     steps:
@@ -41,17 +39,26 @@ jobs:
           "TRITON_INSTALL_DIR=$env:RUNNER_TEMP\triton-install" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "TRITON_INSTALL_DIR=$env:RUNNER_TEMP\triton-install"
 
-      - name: Install LLVM 15 dev (conda-forge llvmdev) + deps
+      - name: Install LLVM 15 dev + Clang 15 (conda-forge) + deps
         shell: bash -l {0}
         run: |
           set -euo pipefail
           conda info
-          conda install -y "llvmdev=15.*" "lld=15.*" zlib libxml2 cmake ninja
+          # clang=15.* 同时安装 clang++ 可执行文件
+          conda install -y "llvmdev=15.*" "lld=15.*" "clang=15.*" zlib libxml2 cmake ninja
           echo "$CONDA_PREFIX/Library/bin" >> "$GITHUB_PATH"
 
           LLVM_DIR="$CONDA_PREFIX/Library/lib/cmake/llvm"
           test -d "$LLVM_DIR"
           echo "LLVM_DIR=$LLVM_DIR" >> "$GITHUB_ENV"
+
+          # 导出 clang++ 路径供 intrinsics 构建使用
+          CLANGPP="$CONDA_PREFIX/Library/bin/clang++.exe"
+          if [ ! -f "$CLANGPP" ]; then
+            CLANGPP="$CONDA_PREFIX/bin/clang++.exe"
+          fi
+          echo "CLANGPP=$CLANGPP" >> "$GITHUB_ENV"
+          echo "clang++ path: $CLANGPP"
 
       - name: Setup Python (for Conan)
         uses: actions/setup-python@v5
@@ -153,8 +160,6 @@ jobs:
           "Z3_LIBRARY=$($z3Lib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "Z3_INCLUDE_DIR=$z3Inc"
           Write-Host "Z3_LIBRARY=$($z3Lib.FullName)"
-
-          # Z3 bin 目录（存放 z3.dll）
           $z3Bin = Join-Path $z3Folder "bin"
           "Z3_BIN_DIR=$z3Bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
@@ -166,7 +171,6 @@ jobs:
           if (!(Test-Path (Join-Path $capInc "capstone\capstone.h"))) {
             throw "capstone/capstone.h not found under $capInc"
           }
-          # 验证 riscv.h 存在（capstone 5.x 特性，Triton master 需要）
           if (!(Test-Path (Join-Path $capInc "capstone\riscv.h"))) {
             throw "capstone/riscv.h not found — need capstone 5.x, got a 4.x package?"
           }
@@ -177,8 +181,6 @@ jobs:
           "CAPSTONE_LIBRARY=$($capLib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "CAPSTONE_INCLUDE_DIR=$capInc"
           Write-Host "CAPSTONE_LIBRARY=$($capLib.FullName)"
-
-          # Capstone bin 目录（存放 capstone.dll）
           $capBin = Join-Path $capFolder "bin"
           "CAPSTONE_BIN_DIR=$capBin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
@@ -198,10 +200,6 @@ jobs:
         shell: python
         run: |
           import re, pathlib, sys
-
-          # Triton master 的 externalLibs.hpp 已经不区分平台，
-          # 直接 include <capstone/arm.h> 等，无需 Patch 1。
-          # 只需禁用 Python bindings 并强制静态库。
 
           # ── Patch 1: libtriton/CMakeLists.txt — 删 PYTHON_BINDINGS 块 ─────────
           lib_cml = pathlib.Path("_deps/triton-src/src/libtriton/CMakeLists.txt")
@@ -270,6 +268,42 @@ jobs:
           }
           Write-Host "Triton static lib installed OK: $env:TRITON_INSTALL_DIR\lib\triton.lib"
 
+      - name: Build intrinsics (vmprotect64.ll / vmprotect32.ll) using clang++
+        shell: pwsh
+        run: |
+          # 确认 clang++ 存在
+          $clangpp = "$env:CLANGPP"
+          if (-not (Test-Path $clangpp)) {
+            # 退而求其次：从 PATH 中找
+            $clangpp = (Get-Command "clang++.exe" -ErrorAction SilentlyContinue).Source
+          }
+          if (-not $clangpp) { throw "clang++ not found" }
+          Write-Host "Using clang++: $clangpp"
+
+          $src    = "intrinsics\main.cpp"
+          $outDir = "intrinsics"
+          $flags  = @(
+            "-std=c++17", "-O3",
+            "-Iintrinsics\remill\include",
+            "-Wno-gnu-inline-cpp-without-extern",
+            "-fno-discard-value-names",
+            "-fstrict-aliasing",
+            "-fno-slp-vectorize",
+            "-mllvm", "-enable-tbaa=true",
+            "-emit-llvm", "-S"
+          )
+
+          # vmprotect64.ll
+          & $clangpp @flags -DADDRESS_SIZE_BITS=64 -m64 $src -o "$outDir\vmprotect64.ll"
+          if ($LASTEXITCODE -ne 0) { throw "Failed to build vmprotect64.ll" }
+
+          # vmprotect32.ll
+          & $clangpp @flags -DADDRESS_SIZE_BITS=32 -m64 $src -o "$outDir\vmprotect32.ll"
+          if ($LASTEXITCODE -ne 0) { throw "Failed to build vmprotect32.ll" }
+
+          Write-Host "Intrinsics built:"
+          Get-Item "$outDir\vmprotect*.ll" | ForEach-Object { Write-Host "  $($_.FullName)" }
+
       - name: Configure titan (CMake)
         shell: pwsh
         run: |
@@ -300,25 +334,28 @@ jobs:
           $dist = "dist"
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
 
-          # 1. titan.exe 本体
+          # titan.exe
           $exe = if (Test-Path "build\Release\titan.exe") { "build\Release\titan.exe" } else { "build\titan.exe" }
           Copy-Item $exe $dist
 
-          # 2. 用 dumpbin 列出 titan.exe 直接依赖的 DLL 名称
+          # vmprotect64.ll / vmprotect32.ll
+          Copy-Item "intrinsics\vmprotect64.ll" $dist
+          Copy-Item "intrinsics\vmprotect32.ll" $dist
+
+          # 用 dumpbin 列出直接依赖的 DLL
           $needed = dumpbin /dependents $exe |
             Select-String '^\s+\S+\.dll' |
             ForEach-Object { $_.ToString().Trim().ToLower() }
           Write-Host "DLLs needed by titan.exe:"
           $needed | ForEach-Object { Write-Host "  $_" }
 
-          # 3. 搜索路径：Conan 包 bin 目录 + conda Library\bin
+          # 搜索路径：Conan 包 bin + conda Library\bin
           $searchDirs = @(
             "$env:Z3_BIN_DIR",
             "$env:CAPSTONE_BIN_DIR",
             "$env:CONDA_PREFIX\Library\bin"
           ) | Where-Object { $_ -and (Test-Path $_) }
 
-          # 4. 对每个依赖 DLL，在搜索路径中查找并复制
           foreach ($dll in $needed) {
             foreach ($dir in $searchDirs) {
               $candidate = Join-Path $dir $dll
@@ -330,7 +367,6 @@ jobs:
             }
           }
 
-          # 5. 列出 dist 目录内容
           Write-Host "=== dist contents ==="
           Get-ChildItem $dist | ForEach-Object { Write-Host "  $($_.Name)" }
 
