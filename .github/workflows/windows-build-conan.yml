@@ -11,9 +11,11 @@ jobs:
 
     env:
       BUILD_DIR: build
-      TRITON_SRC_DIR: ${{ github.workspace }}\_deps\triton-src
       Z3_VERSION: "4.12.2"
       CAPSTONE_VERSION: "4.0.2"
+      # context.hpp 在 Triton v0.10+ 才存在，v0.9 没有该文件
+      # 使用 master 分支以获取最新稳定 API
+      TRITON_GIT_REF: "master"
 
     steps:
       - name: Checkout (with submodules)
@@ -79,9 +81,6 @@ jobs:
 
           $j = Get-Content $jsonPath -Raw | ConvertFrom-Json
           if (-not $j.graph -or -not $j.graph.nodes) {
-            Write-Host "Conan JSON missing graph.nodes, first 2000 chars:"
-            $raw = Get-Content $jsonPath -Raw
-            Write-Host $raw.Substring(0, [Math]::Min(2000, $raw.Length))
             throw "Unexpected Conan JSON: missing graph.nodes"
           }
 
@@ -100,12 +99,10 @@ jobs:
 
           $boostFolder = Get-PkgFolder "boost/"
           if (-not $boostFolder) { throw "Failed to resolve boost package folder from Conan JSON" }
-
           $boostInc = Join-Path $boostFolder "include"
           if (!(Test-Path (Join-Path $boostInc "boost\version.hpp"))) {
             throw "boost/version.hpp not found under $boostInc"
           }
-
           "BOOST_ROOT=$boostFolder"     | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "BOOST_INCLUDE_DIR=$boostInc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "BOOST_ROOT=$boostFolder"
@@ -114,7 +111,7 @@ jobs:
       - name: Install Triton deps (Z3 + Capstone) and export include/lib paths (Conan JSON)
         shell: pwsh
         run: |
-          $z3Ref = "z3/${{ env.Z3_VERSION }}"
+          $z3Ref  = "z3/${{ env.Z3_VERSION }}"
           $capRef = "capstone/${{ env.CAPSTONE_VERSION }}"
           $jsonPath = Join-Path $env:RUNNER_TEMP "conan-triton-deps.json"
 
@@ -127,9 +124,6 @@ jobs:
 
           $j = Get-Content $jsonPath -Raw | ConvertFrom-Json
           if (-not $j.graph -or -not $j.graph.nodes) {
-            Write-Host "Conan JSON did not include graph.nodes. First 2000 chars:"
-            $raw = Get-Content $jsonPath -Raw
-            Write-Host $raw.Substring(0, [Math]::Min(2000, $raw.Length))
             throw "Unexpected Conan JSON: missing graph.nodes"
           }
 
@@ -155,8 +149,8 @@ jobs:
           $z3Lib = Get-ChildItem -Path $z3LibDir -Filter "*.lib" -File -ErrorAction SilentlyContinue |
                    Where-Object { $_.Name -match 'z3' } | Select-Object -First 1
           if (-not $z3Lib) { throw "No z3 .lib found under $z3LibDir" }
-          "Z3_INCLUDE_DIR=$z3Inc"            | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "Z3_LIBRARY=$($z3Lib.FullName)"    | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "Z3_INCLUDE_DIR=$z3Inc"         | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "Z3_LIBRARY=$($z3Lib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "Z3_INCLUDE_DIR=$z3Inc"
           Write-Host "Z3_LIBRARY=$($z3Lib.FullName)"
 
@@ -181,15 +175,20 @@ jobs:
         run: |
           if (Test-Path "_deps\triton-src") { Remove-Item -Recurse -Force "_deps\triton-src" }
           git clone https://github.com/JonathanSalwan/Triton "_deps\triton-src"
-          git -C "_deps\triton-src" checkout "v0.9"
+          git -C "_deps\triton-src" checkout "${{ env.TRITON_GIT_REF }}"
           git -C "_deps\triton-src" rev-parse HEAD
+          # 验证 context.hpp 存在（v0.9 没有此文件）
+          if (!(Test-Path "_deps\triton-src\src\libtriton\includes\triton\context.hpp")) {
+            throw "context.hpp not found in checked-out Triton. Likely wrong version (v0.9 does not have context.hpp)."
+          }
+          Write-Host "context.hpp confirmed present."
 
       - name: Patch Triton source
         shell: python
         run: |
           import re, pathlib, sys
 
-          # ── Patch 1: externalLibs.hpp ─────────────────────────────────────────
+          # ── Patch 1: externalLibs.hpp — 修复 Windows 下 capstone include 路径 ──
           ext_hpp = pathlib.Path(
               "_deps/triton-src/src/libtriton/includes/triton/externalLibs.hpp"
           )
@@ -294,13 +293,8 @@ jobs:
                        Select-Object -First 1
           if (-not $toolchain) { throw "conan_toolchain.cmake not found under $env:BUILD_DIR\conan" }
           $conanGen = $toolchain.DirectoryName
-
           $prefixPath = "$conanGen;$env:CONDA_PREFIX\Library;$env:TRITON_INSTALL_DIR;$env:BOOST_ROOT"
 
-          # TRITON_INCLUDE_DIR / BOOST_INCLUDE_DIR:
-          # 直接传给 CMake 自定义变量，在 CMakeLists.txt 里通过
-          # target_include_directories 追加，解决 tritonTargets.cmake
-          # 无法自动传播 include 路径的问题。
           cmake -S . -B "$env:BUILD_DIR" -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
             -DCMAKE_PREFIX_PATH="$prefixPath" `
